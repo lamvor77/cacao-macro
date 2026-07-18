@@ -16,6 +16,7 @@ import customtkinter as ctk
 from config.cloud_settings import get_message_sync_config
 from config.settings import (
     BOTTOM_BAR_HEIGHT, BUTTON_HEIGHT, FONT_FAMILY,
+    LICENSE_ADMIN_UI_ENABLED,
     OPERATION_END_HOUR, OPERATION_START_HOUR,
     TAB_ACTIVE_ROOMS, TAB_BULK_MESSAGE,
     WINDOW_DEFAULT_HEIGHT, WINDOW_DEFAULT_WIDTH,
@@ -164,16 +165,21 @@ class MainWindow(ctk.CTk):
         )
         self.auth_button.grid(row=0, column=2, padx=(0, 10))
 
-        ctk.CTkButton(
-            right_frame,
-            text="관리자 모드",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
-            width=100,
-            height=28,
-            fg_color="transparent",
-            border_width=1,
-            command=self._on_open_admin_panel,
-        ).grid(row=0, column=3)
+        # 라이선스 관리자(빌드용 라이선스 발급) 버튼 — 개발/빌드 담당자 환경에서만
+        # 노출한다(Phase 3-2). LICENSE_ADMIN_UI_ENABLED=true이고 LICENSE_ADMIN_PASSWORD/
+        # LICENSE_SECRET_KEY가 모두 실제 값으로 설정되어 있을 때만 버튼 자체를
+        # 만든다 — 일반 사용자 배포본(기본값 false)에는 아예 표시되지 않는다.
+        if LICENSE_ADMIN_UI_ENABLED and self._license_mgr.is_fully_configured():
+            ctk.CTkButton(
+                right_frame,
+                text="라이선스 관리자",
+                font=ctk.CTkFont(family=FONT_FAMILY, size=12),
+                width=100,
+                height=28,
+                fg_color="transparent",
+                border_width=1,
+                command=self._on_open_admin_panel,
+            ).grid(row=0, column=3)
 
     def _create_tab_view(self) -> None:
         self.tab_view = ctk.CTkTabview(self)

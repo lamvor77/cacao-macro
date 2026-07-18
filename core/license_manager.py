@@ -16,9 +16,29 @@ import os
 import sys
 from datetime import date, datetime
 
-from config.settings import ADMIN_PASSWORD, LICENSE_BUILD_FILE_NAME, LICENSE_SECRET_KEY
+from config.settings import (
+    LICENSE_ADMIN_PASSWORD,
+    LICENSE_BUILD_FILE_NAME,
+    LICENSE_SECRET_KEY,
+)
 
 logger = logging.getLogger(__name__)
+
+_PLACEHOLDER_PREFIX = "CHANGE_ME_"
+
+
+class LicenseConfigurationError(Exception):
+    """LICENSE_SECRET_KEY가 설정되지 않았거나 플레이스홀더일 때 발급/검증을 차단한다."""
+
+
+def _is_configured_value(value: str) -> bool:
+    """빈 값이나 "CHANGE_ME_"로 시작하는 예제용 플레이스홀더는 실제 설정으로 인정하지 않는다."""
+    value = (value or "").strip()
+    if not value:
+        return False
+    if value.startswith(_PLACEHOLDER_PREFIX):
+        return False
+    return True
 
 
 def _resource_dir() -> str:
@@ -39,9 +59,32 @@ class LicenseManager:
     def __init__(self):
         self._build_license_path = os.path.join(_resource_dir(), LICENSE_BUILD_FILE_NAME)
 
+    # ===== 설정 검증 (fail-closed 판단의 기준) =====
+
+    def is_admin_password_configured(self) -> bool:
+        """LICENSE_ADMIN_PASSWORD가 실제 값으로 설정되어 있는지."""
+        return _is_configured_value(LICENSE_ADMIN_PASSWORD)
+
+    def is_license_secret_configured(self) -> bool:
+        """LICENSE_SECRET_KEY가 실제 값으로 설정되어 있는지."""
+        return _is_configured_value(LICENSE_SECRET_KEY)
+
+    def is_fully_configured(self) -> bool:
+        """관리자 인증과 라이선스 서명 모두에 필요한 값이 갖춰져 있는지.
+
+        MainWindow가 라이선스 관리자 버튼 노출 여부를 판단할 때 재사용한다.
+        """
+        return self.is_admin_password_configured() and self.is_license_secret_configured()
+
     # ===== 서명 =====
 
     def _sign(self, message: str) -> str:
+        """LICENSE_SECRET_KEY가 설정되지 않았으면 빈 키/예제 키로 서명하지 않고
+        즉시 실패한다(원칙: 설정 누락 상태로 라이선스를 발급/검증하지 않는다)."""
+        if not self.is_license_secret_configured():
+            raise LicenseConfigurationError(
+                "LICENSE_SECRET_KEY가 설정되지 않았습니다 — .env에 실제 값을 설정하세요."
+            )
         return hmac.new(LICENSE_SECRET_KEY.encode(), message.encode(), hashlib.sha256).hexdigest()
 
     def _license_message(self, start_date: str, end_date: str) -> str:
@@ -50,15 +93,31 @@ class LicenseManager:
     # ===== 관리자 인증 =====
 
     def verify_admin_password(self, password: str) -> bool:
-        """입력한 비밀번호가 관리자 비밀번호와 일치하는지 확인한다."""
-        return hmac.compare_digest(password, ADMIN_PASSWORD)
+        """입력한 비밀번호가 관리자 비밀번호와 일치하는지 확인한다.
+
+        설정이 누락되어 있으면(빈 값/플레이스홀더) 어떤 입력에도 항상 실패한다
+        (원칙: 설정 누락 시 기본 비밀번호를 제공하지 않는다 — 즉 인증 성공으로
+        간주하지 않는다). 비밀번호 값 자체는 로그에 남기지 않는다.
+        """
+        if not isinstance(password, str) or not password:
+            return False
+        if not self.is_admin_password_configured():
+            logger.warning("LICENSE_ADMIN_PASSWORD가 설정되지 않아 관리자 인증을 거부합니다.")
+            return False
+        # hmac.compare_digest()는 두 인자가 모두 bytes이거나 모두 ASCII-only str이어야
+        # 하며, 그렇지 않으면 TypeError를 던진다 — 한글 등 비ASCII 비밀번호를 설정하면
+        # (버그였음: 이전 코드 그대로도 동일하게 터졌을 것) 이 비교에서 그대로 예외가
+        # 나 인증 로직 전체가 죽는다. UTF-8로 인코딩해 두 값 모두 bytes로 맞춰 비교하면
+        # 어떤 문자열이든 안전하게(타이밍 공격 내성 유지) 비교할 수 있다.
+        return hmac.compare_digest(password.encode("utf-8"), LICENSE_ADMIN_PASSWORD.encode("utf-8"))
 
     # ===== 라이선스 발급 (관리자 측, 빌드 전 실행) =====
 
     def generate_build_license(self, start_date: str, end_date: str) -> dict:
         """지정된 기간으로 서명된 빌드용 라이선스 데이터를 생성한다.
 
-        호출 전 관리자 비밀번호 확인은 호출자의 책임이다.
+        호출 전 관리자 비밀번호 확인은 호출자의 책임이다. LICENSE_SECRET_KEY가
+        설정되지 않았으면 LicenseConfigurationError를 던진다(발급 자체를 막는다).
         """
         return {
             "start_date": start_date,
@@ -96,7 +155,12 @@ class LicenseManager:
         except KeyError:
             return False, "라이선스 파일 형식이 올바르지 않습니다."
 
-        expected_signature = self._sign(self._license_message(start_date_str, end_date_str))
+        try:
+            expected_signature = self._sign(self._license_message(start_date_str, end_date_str))
+        except LicenseConfigurationError:
+            logger.error("LicenseConfigurationError: LICENSE_SECRET_KEY 설정 누락으로 라이선스 검증을 차단합니다.")
+            return False, "라이선스 관리자 설정이 완료되지 않았습니다. 관리자에게 문의하세요."
+
         if not hmac.compare_digest(signature, expected_signature):
             return False, "라이선스 파일이 손상되었거나 위변조되었습니다."
 

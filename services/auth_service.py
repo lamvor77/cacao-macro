@@ -115,6 +115,16 @@ class AppUserProfile:
     def can_write(self) -> bool:
         return self.is_approved and self.role in ("editor", "admin")
 
+    @property
+    def is_admin(self) -> bool:
+        """운영 관리자 여부 — approved 상태이고 role이 admin일 때만 True.
+
+        Phase 3-2: 아직 이 값을 소비하는 관리자 UI/기능은 없다(판정 로직만
+        추가). can_write(editor/admin 동일 취급)와는 별개 — admin이라도
+        status가 approved가 아니면(pending/blocked) is_admin은 항상 False다.
+        """
+        return self.is_approved and self.role == "admin"
+
 
 def _session_dir() -> str:
     """세션 파일을 둘 디렉터리.

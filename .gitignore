@@ -1,27 +1,27 @@
-# Python
+# ===== 민감정보 =====
+.env
+license_build.json
+
+# ===== Python =====
 __pycache__/
 *.pyc
 *.pyo
-*.pyd
-.venv/
-venv/
 
-# Environment
-.env
-.env.local
+# ===== 빌드 산출물 =====
+build/
+dist/
 
-# IDE
+# ===== 런타임 데이터 =====
+logs/*.log
+storage/*.json
+storage/cloud_sync/
+!storage/.gitkeep
+!logs/.gitkeep
+
+# ===== 에디터/OS =====
 .vscode/
 .idea/
-
-# Logs
-*.log
-
-# Runtime data
-storage/cloud_sync/session.dat
-storage/cloud_sync/messages.json
-storage/cloud_sync/local_sync_state.json
-
-# OS
 Thumbs.db
-.DS_Store
+
+# ===== Claude Code 로컬 설정 (개인별 권한 기록, 공유하지 않음) =====
+.claude/settings.local.json

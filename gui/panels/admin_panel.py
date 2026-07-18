@@ -116,7 +116,22 @@ class AdminPanel(ctk.CTkToplevel):
 
 
 def open_admin_panel(parent, license_mgr: LicenseManager, log_callback: Callable[[str], None]) -> None:
-    """관리자 비밀번호를 확인한 뒤, 성공한 경우에만 AdminPanel을 연다."""
+    """관리자 비밀번호를 확인한 뒤, 성공한 경우에만 AdminPanel을 연다.
+
+    LICENSE_ADMIN_PASSWORD 또는 LICENSE_SECRET_KEY가 설정되지 않았으면 비밀번호
+    입력창 자체를 띄우지 않는다(원칙: 설정 누락 시 인증 성공으로 간주하지
+    않으며, 애초에 시도조차 허용하지 않는다 — fail-closed).
+    """
+    if not license_mgr.is_fully_configured():
+        logger.warning("라이선스 관리자 설정 누락 — 관리자 인증창을 열지 않습니다.")
+        messagebox.showerror(
+            "사용 불가",
+            "이 기능은 현재 사용할 수 없습니다.\n관리자 설정을 확인해 주세요.",
+            parent=parent,
+        )
+        log_callback("[경고] 라이선스 관리자 설정이 완료되지 않아 관리자 모드를 열 수 없습니다.")
+        return
+
     password = simpledialog.askstring(
         "관리자 인증", "관리자 비밀번호를 입력하세요:", show="*", parent=parent
     )
