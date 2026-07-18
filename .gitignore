@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Runtime data
+storage/cloud_sync/session.dat
+storage/cloud_sync/messages.json
+storage/cloud_sync/local_sync_state.json
+
+# OS
+Thumbs.db
+.DS_Store

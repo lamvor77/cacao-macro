@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "defaultMode": "bypassPermissions",
+    "allow": [
+      "Bash(python -m PyInstaller cacao_macro.spec --noconfirm)",
+      "Bash(rm -rf storage logs)",
+      "Bash(./cacao_macro.exe)",
+      "Bash(ls storage/)",
+      "Bash(ls logs/)"
+    ]
+  }
+}

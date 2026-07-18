@@ -1,0 +1,14 @@
+customtkinter>=5.2.0
+pywin32>=306
+psutil>=5.9.0
+pywinauto>=0.6.8
+pyautogui>=0.9.54
+pyperclip>=1.8.2
+schedule>=1.2.0
+Pillow>=10.0.0
+
+# ===== Phase 2: 클라우드 동기화 (선택 기능) =====
+# SUPABASE_ENABLED=False(기본값)이면 아래 두 패키지가 없어도 프로그램은
+# 정상 실행된다 (services/supabase_client.py가 ImportError를 안전하게 처리함).
+supabase>=2.0.0
+python-dotenv>=1.0.0
