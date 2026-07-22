@@ -1,4 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <rect width="32" height="32" rx="6" fill="#1a1a2e"/>
-  <text x="16" y="22" font-size="16" text-anchor="middle" fill="#FEE500" font-family="sans-serif">메</text>
+  <rect width="32" height="32" fill="#1a1a2e"/>
+  <path d="M9 9.5c0-1.66 1.34-3 3-3h8c1.66 0 3 1.34 3 3v6c0 1.66-1.34 3-3 3h-5.2l-1.9 2.35c-.4.5-1.2.24-1.24-.4l-.16-1.95h-1.5c-1.66 0-3-1.34-3-3v-6z" fill="#FEE500"/>
+  <circle cx="13.2" cy="12.5" r="1.05" fill="#1a1a2e"/>
+  <circle cx="16" cy="12.5" r="1.05" fill="#1a1a2e"/>
+  <circle cx="18.8" cy="12.5" r="1.05" fill="#1a1a2e"/>
 </svg>

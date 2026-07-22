@@ -18,11 +18,10 @@ _EXCLUDED_DIR_NAMES = {
     "test-runtime", "backup", ".pytest_cache",
 }
 
-# 과거 배포 이력 산출물 — 요구사항에 따라 예외 처리.
-_EXCLUDED_PATH_PREFIXES = (
-    os.path.join(PROJECT_ROOT, "release", "cacao_macro-v1.0.0-rc.1"),
-    os.path.join(PROJECT_ROOT, "release", "cacao_macro-v1.2.0"),
-)
+# 배포 산출물 폴더(release/cacao_macro-v*/) 전체 — 그 자체가 배포 이력이라
+# 예외 처리한다(요구사항 — "과거 changelog나 release notes는 제외 가능").
+# 버전마다 이 목록을 손으로 추가할 필요 없도록 접두사 패턴으로 매칭한다.
+_RELEASE_DIR_PREFIX = os.path.join(PROJECT_ROOT, "release", "cacao_macro-v")
 
 # requirements.txt의 "schedule>=1.2.0"처럼 우리 앱 버전과 무관한 서드파티
 # 패키지 버전 고정 표기가 우연히 겹치는 파일 — 파일 단위로 예외 처리한다.
@@ -37,7 +36,7 @@ _SELF_PATH = os.path.abspath(__file__)
 def _iter_source_files():
     for dirpath, dirnames, filenames in os.walk(PROJECT_ROOT):
         dirnames[:] = [d for d in dirnames if d not in _EXCLUDED_DIR_NAMES]
-        if any(dirpath.startswith(prefix) for prefix in _EXCLUDED_PATH_PREFIXES):
+        if dirpath.startswith(_RELEASE_DIR_PREFIX):
             continue
         for filename in filenames:
             if filename in _EXCLUDED_FILENAMES:

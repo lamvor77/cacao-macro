@@ -49,7 +49,13 @@ if PROJECT_ROOT not in sys.path:
 
 # 알려진 운영 프로젝트 호스트(일부) — 이 문자열이 SUPABASE_URL에 포함되어 있으면
 # 절대 실행하지 않는다. 새 운영 프로젝트가 생기면 이 목록에 추가한다.
-_PRODUCTION_HOST_DENYLIST = ("nojdwuoronqmvpdptvlr",)
+_PRODUCTION_HOST_DENYLIST = ("kdyxxkltafeuucijiyzp",)
+# 운영 프로젝트 전환(2026-07): cacao-macro-test(kdyxxkltafeuucijiyzp)가 운영으로
+# 승격되고, 기존 운영 프로젝트(nojdwuoronqmvpdptvlr)는 삭제됐다 — 이 차단 목록은
+# "지금 진짜 운영인 프로젝트"를 가리켜야 안전장치로서 의미가 있으므로 값을
+# 교체했다(옛 값을 지우고 새 값을 안 넣으면 이 스크립트가 아무 프로젝트도
+# 차단하지 못하는 상태가 된다 — 그게 더 위험하다). 이후 별도의 테스트 전용
+# 프로젝트를 새로 만들면, 그 프로젝트의 .env로 이 스크립트를 실행할 것.
 
 _TEST_MESSAGE_NO_DEFAULT = 12
 _TEST_MARKER = "[RLS_RPC_PERMISSION_TEST]"

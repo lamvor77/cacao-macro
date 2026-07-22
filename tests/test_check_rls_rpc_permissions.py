@@ -38,13 +38,13 @@ class TestProductionGuard(unittest.TestCase):
     def test_known_production_host_blocked_even_with_test_env(self):
         os.environ["APP_ENV"] = "test"
         with self.assertRaises(SystemExit) as ctx:
-            _mod._guard_not_production("https://nojdwuoronqmvpdptvlr.supabase.co")
+            _mod._guard_not_production("https://kdyxxkltafeuucijiyzp.supabase.co")
         self.assertEqual(ctx.exception.code, 2)
 
     def test_known_production_host_blocked_case_insensitive(self):
         os.environ["APP_ENV"] = "test"
         with self.assertRaises(SystemExit):
-            _mod._guard_not_production("https://NOJDWUORONQMVPDPTVLR.supabase.co")
+            _mod._guard_not_production("https://KDYXXKLTAFEUUCIJIYZP.supabase.co")
 
     def test_missing_test_env_flag_blocked_even_for_unknown_host(self):
         with self.assertRaises(SystemExit) as ctx:

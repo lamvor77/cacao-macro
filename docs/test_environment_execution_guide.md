@@ -1,5 +1,13 @@
 # 테스트 환경 배포 & E2E 검증 — 실행 가이드 (사용자용)
 
+> ⚠️ **2026-07 운영 전환 이후 재검토 필요**: 이 문서가 전제하는 "운영과
+> 완전히 분리된 테스트 프로젝트"였던 `cacao-macro-test`(`kdyxxkltafeuucijiyzp`)가
+> 운영으로 승격됐고, 기존 운영 프로젝트(`nojdwuoronqmvpdptvlr`)는 삭제됐다.
+> 즉 지금 이 저장소에는 이 문서가 요구하는 "운영과 분리된 테스트 프로젝트"가
+> 더 이상 없다. 앞으로 이 문서의 절차를 다시 쓰려면(예: 새 테스트 프로젝트를
+> 만들 때) 0번 준비물부터 새로 진행하고, 아래 10행의 프로젝트 참조도 새
+> 운영 프로젝트 기준으로 갱신할 것.
+
 이 문서는 Test Environment Deployment & E2E Validation Sprint에서 **사람이 직접
 수행해야 하는 모든 단계**를 순서대로 정리한 것이다. Claude는 Supabase 계정
 생성, Google OAuth 로그인 동의, Windows 절전 전환, 실제 휴대폰 네트워크 전환,
@@ -7,8 +15,8 @@
 직접 실행한 뒤 각 `docs/test_results/*.md` 파일에 결과를 채우거나, 결과를
 대화로 알려주면 Claude가 대신 정리해 넣는다.
 
-**절대 원칙**: 아래 어떤 단계도 운영 Supabase 프로젝트(`nojdwuoronqmvpdptvlr...`)
-에 대해 실행하지 않는다. 모든 스크립트는 실행 전 `APP_ENV=test` 또는
+**절대 원칙**: 아래 어떤 단계도 운영 Supabase 프로젝트(현재 `kdyxxkltafeuucijiyzp` —
+위 경고 참고)에 대해 실행하지 않는다. 모든 스크립트는 실행 전 `APP_ENV=test` 또는
 `SUPABASE_ENVIRONMENT=test`가 설정되어 있는지, URL이 알려진 운영 호스트가
 아닌지 확인하는 안전장치가 있다(설정 안 돼 있으면 스크립트가 스스로 중단한다).
 
