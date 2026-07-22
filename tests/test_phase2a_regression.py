@@ -52,11 +52,24 @@ class TestCloudConfigDefaults(unittest.TestCase):
         cfg = get_cloud_config()
         self.assertFalse(cfg.enabled)
 
-    def test_default_poll_interval_is_30(self):
-        """Phase 2C: 폴링 기본 주기를 30초로 조정했다 (기존 60초에서 변경)."""
+    def test_sync_interval_env_var_removed_from_config(self):
+        """legacy messages 상시 30초 polling 제거 — CloudConfig에 더 이상
+        sync_interval_seconds 필드가 없어야 한다(요구사항 5절)."""
         from config.cloud_settings import get_cloud_config
         cfg = get_cloud_config()
-        self.assertEqual(cfg.sync_interval_seconds, 30)
+        self.assertFalse(hasattr(cfg, "sync_interval_seconds"))
+
+    def test_sync_interval_env_var_set_logs_deprecation_warning(self):
+        """SUPABASE_SYNC_INTERVAL_SECONDS가 여전히 .env에 남아있어도 프로그램이
+        죽지 않고, 더 이상 쓰이지 않는다는 경고만 남겨야 한다."""
+        os.environ["SUPABASE_SYNC_INTERVAL_SECONDS"] = "30"
+        try:
+            from config.cloud_settings import get_cloud_config
+            with self.assertLogs("config.cloud_settings", level="WARNING") as cm:
+                get_cloud_config()
+            self.assertTrue(any("더 이상 사용되지 않습니다" in line for line in cm.output))
+        finally:
+            os.environ["SUPABASE_SYNC_INTERVAL_SECONDS"] = ""
 
     def test_device_id_auto_generated(self):
         from config.cloud_settings import get_cloud_config
@@ -79,7 +92,7 @@ class TestCloudSyncServiceGating(unittest.TestCase):
         from config.cloud_settings import CloudConfig
         from services.cloud_sync_service import CloudSyncService
 
-        cfg = CloudConfig(enabled=False, url="", anon_key="", sync_interval_seconds=30, device_id="pc-test")
+        cfg = CloudConfig(enabled=False, url="", anon_key="", device_id="pc-test")
         svc = CloudSyncService(cfg)
 
         self.assertFalse(svc.is_enabled())

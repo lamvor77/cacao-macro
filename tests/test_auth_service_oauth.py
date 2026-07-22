@@ -186,7 +186,7 @@ class AuthServiceOAuthTestBase(unittest.TestCase):
         self._client = FakeSupabaseClient()
         self._mgr = FakeClientManager(client=self._client)
         cfg = CloudConfig(enabled=True, url="https://project.supabase.co", anon_key="anon-key",
-                           sync_interval_seconds=30, device_id="pc-test")
+                           device_id="pc-test")
         self._auth = AuthService(config=cfg, client_manager=self._mgr)
         self._auth._session_path = os.path.join(self._tmp_dir, "session.dat")
 

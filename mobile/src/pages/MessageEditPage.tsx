@@ -12,7 +12,6 @@ interface Props {
 
 export function MessageEditPage({ shared, messageNo, onBack, isAdmin }: Props) {
   const state = shared.states[messageNo];
-  const [title, setTitle] = useState(state.title ?? "");
   const [content, setContent] = useState(state.content);
   const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -21,7 +20,6 @@ export function MessageEditPage({ shared, messageNo, onBack, isAdmin }: Props) {
   // (요구사항 10절 — 대신 아래 "다른 직원이 수정함" 배너로 안내한다).
   useEffect(() => {
     shared.beginEdit(messageNo);
-    setTitle(state.title ?? "");
     setContent(state.content);
     return () => shared.endEdit(messageNo);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -30,7 +28,7 @@ export function MessageEditPage({ shared, messageNo, onBack, isAdmin }: Props) {
   const handleSave = async () => {
     setSaveError(null);
     try {
-      await shared.saveMessage(messageNo, content, title || null);
+      await shared.saveMessage(messageNo, content);
       onBack();
     } catch (e) {
       if (e instanceof SaveConflictError) {
@@ -50,7 +48,6 @@ export function MessageEditPage({ shared, messageNo, onBack, isAdmin }: Props) {
 
   const handleReloadLatest = () => {
     shared.loadLatestAndDiscardEdit(messageNo);
-    setTitle(shared.states[messageNo].title ?? "");
     setContent(shared.states[messageNo].content);
   };
 
@@ -68,7 +65,7 @@ export function MessageEditPage({ shared, messageNo, onBack, isAdmin }: Props) {
     if (!confirmed) return;
     setSaveError(null);
     try {
-      await shared.forceSaveMessage(messageNo, content, title || null);
+      await shared.forceSaveMessage(messageNo, content);
       onBack();
     } catch (e) {
       setSaveError(e instanceof Error ? e.message : "강제 저장 중 오류가 발생했습니다.");
@@ -110,15 +107,6 @@ export function MessageEditPage({ shared, messageNo, onBack, isAdmin }: Props) {
           </div>
         </div>
       )}
-
-      <label className="field-label" htmlFor="msg-title">제목(선택)</label>
-      <input
-        id="msg-title"
-        className="text-input"
-        value={title}
-        onChange={(e) => setTitle(e.target.value)}
-        maxLength={200}
-      />
 
       <label className="field-label" htmlFor="msg-content">내용</label>
       <textarea

@@ -26,9 +26,6 @@ except ImportError:
 
 # ===== 기본값 =====
 DEFAULT_SUPABASE_ENABLED: bool = False
-# Phase 2C: CloudSyncCoordinator의 폴링 주기 기본값. 기존 SUPABASE_SYNC_INTERVAL_SECONDS
-# 변수를 그대로 재사용한다(새 변수를 만들지 않음) — 기본값만 60→30초로 조정했다.
-DEFAULT_SYNC_INTERVAL_SECONDS: int = 30
 DEFAULT_TIMEOUT_SECONDS: float = 5.0
 _MESSAGES_TABLE: str = "messages"
 
@@ -45,6 +42,20 @@ _MIN_CLOUD_SYNC_INTERVAL_SECONDS: int = 60
 _MIN_EXIT_WAIT_SECONDS: float = 0.0
 _MAX_EXIT_WAIT_SECONDS: float = 5.0
 
+# ===== Production Stabilization Sprint: 발송 직전 검증 정책 기본값 =====
+DEFAULT_SEND_OFFLINE_POLICY: str = "block"
+DEFAULT_SEND_VERIFY_TIMEOUT_SECONDS: float = 5.0
+DEFAULT_SEND_VERIFY_RETRY_COUNT: int = 2
+DEFAULT_MESSAGE_SYNC_DEBUG: bool = False
+# Realtime protocol 2.0(배열 메시지) 호환 계층 즉시 비활성화 스위치
+# (services/realtime_protocol_compat.py 참고) — 기본 true(호환 계층 사용).
+DEFAULT_REALTIME_PROTOCOL_COMPAT: bool = True
+_VALID_SEND_OFFLINE_POLICIES = ("block", "cached")
+_MIN_SEND_VERIFY_TIMEOUT_SECONDS: float = 1.0
+_MAX_SEND_VERIFY_TIMEOUT_SECONDS: float = 30.0
+_MIN_SEND_VERIFY_RETRY_COUNT: int = 0
+_MAX_SEND_VERIFY_RETRY_COUNT: int = 5
+
 
 @dataclass(frozen=True)
 class CloudConfig:
@@ -53,10 +64,21 @@ class CloudConfig:
     enabled: bool
     url: str
     anon_key: str
-    sync_interval_seconds: int
     device_id: str
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     messages_table: str = _MESSAGES_TABLE
+    # Mobile 실시간 동기화 스프린트: SUPABASE_ENABLED와 별개로 Realtime 구독만
+    # 끌 수 있는 독립 스위치(기본 true — enabled=true면 realtime도 기본 동작).
+    # legacy messages 동기화(CloudSyncCoordinator)에는 영향을 주지 않는다 —
+    # 이 값은 services/realtime_message_sync_service.py 시작 여부만 결정한다.
+    realtime_enabled: bool = True
+    # ===== Production Stabilization Sprint 11절: 레거시/신규 이원 체계 전환 플래그 =====
+    # 지금 당장은 셋 다 사실상 항상 True로 둔다(레거시 유지 + shared_messages 추가) —
+    # 실제 전환(레거시 폐기)을 결정할 때 이 플래그들로 단계적으로 끌 수 있도록
+    # 미리 자리만 마련해 둔 것이다. docs/legacy_messages_migration_plan.md 참고.
+    shared_messages_enabled: bool = True
+    legacy_messages_sync_enabled: bool = True
+    shared_messages_primary: bool = True
 
 
 @dataclass(frozen=True)
@@ -75,6 +97,21 @@ class MessageSyncConfig:
     cloud_sync_on_send_start: bool
     cloud_sync_on_exit: bool
     cloud_sync_exit_wait_seconds: float
+    # ===== Production Stabilization Sprint: 발송 직전 검증 정책 =====
+    # block: 서버 확인 실패 시 해당 발송 건을 보내지 않는다(기본값, 안전 우선).
+    # cached: 서버 확인 실패 시 마지막으로 알려진 캐시 내용으로 발송한다.
+    send_offline_policy: str = "block"
+    send_verify_timeout_seconds: float = 5.0
+    send_verify_retry_count: int = 2
+    # MESSAGE_SYNC_DEBUG — true면 상태 전환/message_no/revision/이벤트 종류/재연결
+    # 횟수/발송 검증 결과 등 세부 로그를 남긴다. 메시지 본문/토큰/키는 이 값과
+    # 무관하게 항상 로그에 남기지 않는다(core/scheduler.py, services/
+    # realtime_message_sync_service.py, gui/main_window.py 참고).
+    sync_debug_enabled: bool = False
+    # Realtime protocol 2.0(배열 메시지) 호환 계층 사용 여부. false로 두면
+    # services/realtime_protocol_compat.py의 CompatAsyncRealtimeClient 대신
+    # 원본 AsyncRealtimeClient를 그대로 쓴다(즉시 원상복구용 안전장치).
+    realtime_protocol_compat_enabled: bool = True
 
 
 def _get_bool_env(name: str, default: bool) -> bool:
@@ -128,8 +165,20 @@ def get_cloud_config() -> CloudConfig:
     enabled = _get_bool_env("SUPABASE_ENABLED", DEFAULT_SUPABASE_ENABLED)
     url = os.environ.get("SUPABASE_URL", "").strip()
     anon_key = os.environ.get("SUPABASE_ANON_KEY", "").strip()
-    sync_interval = _get_int_env("SUPABASE_SYNC_INTERVAL_SECONDS", DEFAULT_SYNC_INTERVAL_SECONDS)
+    if os.environ.get("SUPABASE_SYNC_INTERVAL_SECONDS", "").strip():
+        # legacy messages의 상시 30초 pull polling을 제거하면서 이 값은 더
+        # 이상 어디에도 쓰이지 않는다(요구사항) — 조용히 무시하지 않고, 설정
+        # 파일을 아직 정리하지 않은 운영자가 알아챌 수 있도록 경고만 남긴다.
+        logger.warning(
+            "SUPABASE_SYNC_INTERVAL_SECONDS는 더 이상 사용되지 않습니다(상시 폴링이 "
+            "제거됨) — .env에서 이 값을 지워도 됩니다. 현재는 아무 동작에도 영향을 "
+            "주지 않습니다."
+        )
     device_id = os.environ.get("SUPABASE_DEVICE_ID", "").strip() or _default_device_id()
+    realtime_enabled = _get_bool_env("SUPABASE_REALTIME_ENABLED", True)
+    shared_messages_enabled = _get_bool_env("SHARED_MESSAGES_ENABLED", True)
+    legacy_messages_sync_enabled = _get_bool_env("LEGACY_MESSAGES_SYNC_ENABLED", True)
+    shared_messages_primary = _get_bool_env("SHARED_MESSAGES_PRIMARY", True)
 
     if enabled and (not url or not anon_key):
         logger.warning(
@@ -142,8 +191,11 @@ def get_cloud_config() -> CloudConfig:
         enabled=enabled,
         url=url,
         anon_key=anon_key,
-        sync_interval_seconds=sync_interval,
         device_id=device_id,
+        realtime_enabled=realtime_enabled,
+        shared_messages_enabled=shared_messages_enabled,
+        legacy_messages_sync_enabled=legacy_messages_sync_enabled,
+        shared_messages_primary=shared_messages_primary,
     )
 
 
@@ -183,6 +235,32 @@ def get_message_sync_config() -> MessageSyncConfig:
         )
         exit_wait_seconds = DEFAULT_MESSAGE_CLOUD_SYNC_EXIT_WAIT_SECONDS
 
+    offline_policy = os.environ.get("MESSAGE_SEND_OFFLINE_POLICY", "").strip().lower() or DEFAULT_SEND_OFFLINE_POLICY
+    if offline_policy not in _VALID_SEND_OFFLINE_POLICIES:
+        logger.warning(
+            f"MESSAGE_SEND_OFFLINE_POLICY 값({offline_policy!r})이 올바르지 않습니다 — "
+            f"기본값 {DEFAULT_SEND_OFFLINE_POLICY!r}(안전 우선)을 사용합니다."
+        )
+        offline_policy = DEFAULT_SEND_OFFLINE_POLICY
+
+    verify_timeout = _get_float_env("MESSAGE_SEND_VERIFY_TIMEOUT_SECONDS", DEFAULT_SEND_VERIFY_TIMEOUT_SECONDS)
+    if not (_MIN_SEND_VERIFY_TIMEOUT_SECONDS <= verify_timeout <= _MAX_SEND_VERIFY_TIMEOUT_SECONDS):
+        logger.warning(
+            f"MESSAGE_SEND_VERIFY_TIMEOUT_SECONDS 값({verify_timeout})이 "
+            f"허용 범위({_MIN_SEND_VERIFY_TIMEOUT_SECONDS}~{_MAX_SEND_VERIFY_TIMEOUT_SECONDS}) 밖입니다 — "
+            f"기본값 {DEFAULT_SEND_VERIFY_TIMEOUT_SECONDS}을(를) 사용합니다."
+        )
+        verify_timeout = DEFAULT_SEND_VERIFY_TIMEOUT_SECONDS
+
+    verify_retry_count = _get_int_env("MESSAGE_SEND_VERIFY_RETRY_COUNT", DEFAULT_SEND_VERIFY_RETRY_COUNT)
+    if not (_MIN_SEND_VERIFY_RETRY_COUNT <= verify_retry_count <= _MAX_SEND_VERIFY_RETRY_COUNT):
+        logger.warning(
+            f"MESSAGE_SEND_VERIFY_RETRY_COUNT 값({verify_retry_count})이 "
+            f"허용 범위({_MIN_SEND_VERIFY_RETRY_COUNT}~{_MAX_SEND_VERIFY_RETRY_COUNT}) 밖입니다 — "
+            f"기본값 {DEFAULT_SEND_VERIFY_RETRY_COUNT}을(를) 사용합니다."
+        )
+        verify_retry_count = DEFAULT_SEND_VERIFY_RETRY_COUNT
+
     return MessageSyncConfig(
         local_autosave_enabled=_get_bool_env(
             "MESSAGE_LOCAL_AUTOSAVE_ENABLED", DEFAULT_MESSAGE_LOCAL_AUTOSAVE_ENABLED
@@ -194,4 +272,11 @@ def get_message_sync_config() -> MessageSyncConfig:
         ),
         cloud_sync_on_exit=_get_bool_env("MESSAGE_CLOUD_SYNC_ON_EXIT", DEFAULT_MESSAGE_CLOUD_SYNC_ON_EXIT),
         cloud_sync_exit_wait_seconds=exit_wait_seconds,
+        send_offline_policy=offline_policy,
+        send_verify_timeout_seconds=verify_timeout,
+        send_verify_retry_count=verify_retry_count,
+        sync_debug_enabled=_get_bool_env("MESSAGE_SYNC_DEBUG", DEFAULT_MESSAGE_SYNC_DEBUG),
+        realtime_protocol_compat_enabled=_get_bool_env(
+            "REALTIME_PROTOCOL_COMPAT", DEFAULT_REALTIME_PROTOCOL_COMPAT
+        ),
     )

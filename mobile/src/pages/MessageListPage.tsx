@@ -50,7 +50,7 @@ export function MessageListPage({ shared, onSelect, onLogout, userEmail }: Props
                 <span className="message-no">메시지 {n}</span>
                 <span className={`status-chip status-${state.status}`}>{STATUS_LABELS_KO[state.status]}</span>
               </div>
-              <div className="message-preview">{truncate(state.title || state.content)}</div>
+              <div className="message-preview">{truncate(state.content)}</div>
               <div className="muted small">
                 {state.updatedByName ? `${state.updatedByName} · ` : ""}
                 {state.updatedAt ? new Date(state.updatedAt).toLocaleString("ko-KR") : "-"} · rev {state.revision}

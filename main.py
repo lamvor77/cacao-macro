@@ -10,6 +10,7 @@ import tkinter.messagebox as messagebox
 import customtkinter as ctk
 
 from config.settings import LOCK_PORT
+from config.version import version_summary
 from core.license_manager import LicenseManager
 from utils.logger_setup import setup_file_logging
 from gui.main_window import MainWindow
@@ -40,7 +41,7 @@ def _show_duplicate_error() -> None:
 
 
 def _show_license_error(reason: str) -> None:
-    """라이선스 오류 다이얼로그를 표시한다."""
+    """라이선스(빌드 서명) 오류 다이얼로그를 표시한다."""
     root = tk.Tk()
     root.withdraw()
     messagebox.showerror("라이선스 오류", reason)
@@ -57,16 +58,19 @@ def main() -> None:
     # 2. 파일 로그 설정 (앱 실행 전 가장 먼저)
     log_file = setup_file_logging()
     logger.info("=" * 60)
-    logger.info("프로그램 시작")
+    logger.info(f"프로그램 시작 — {version_summary()}")
     logger.info(f"로그 파일: {log_file}")
 
     try:
-        # 3. 라이선스 확인 — 개발 모드(관리자 본인)는 항상 통과, exe로 빌드된
-        #    경우에만 빌드 시 포함된 license_build.json의 사용 기간을 검사한다.
+        # 3. 빌드 서명 검증 — 이 exe 옆의 license_build.json이 관리자가 정식
+        #    발급한 빌드인지(파일 존재/형식/서명 무결성)만 확인한다. 날짜
+        #    (시작일/만료일)는 검사하지 않는다 — 개발 모드(관리자 본인)는
+        #    항상 통과, exe로 빌드된 경우에만 실제로 검사한다
+        #    (core/license_manager.py::verify_build_signature() 참고).
         license_mgr = LicenseManager()
-        valid, reason = license_mgr.check_build_license()
+        valid, reason = license_mgr.verify_build_signature()
         if not valid:
-            logger.warning(f"라이선스 확인 실패 - 프로그램 종료 (사유: {reason})")
+            logger.warning(f"빌드 서명 검증 실패 - 프로그램 종료 (사유: {reason})")
             _show_license_error(reason)
             sys.exit(1)
 
@@ -74,7 +78,9 @@ def main() -> None:
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
 
-        # 5. 메인 윈도우 실행
+        # 5. 메인 윈도우 실행 — 실제 사용 권한(누가 쓸 수 있는가)은 Supabase
+        #    계정 인증/승인 상태로 관리한다(services/auth_service.py,
+        #    MainWindow 시작 시 로그인 → app_users.status == approved).
         app = MainWindow(log_file=log_file)
         app.mainloop()
 

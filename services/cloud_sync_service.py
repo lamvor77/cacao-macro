@@ -214,6 +214,58 @@ class CloudSyncService:
         logger.info(f"클라우드 메시지 다운로드 완료 — {len(records)}건")
         return SyncResult(True, messages=records)
 
+    def pull_message(self, number: int) -> Optional[MessageRecord]:
+        """메시지 1건만 조회한다(전체 12건 SELECT가 아님) — 발송 직전 검증
+        전용(core/legacy_send_verification.py). 상시 폴링을 제거하면서, 발송
+        직전에는 그 메시지 하나만 필요한 시점에 조회하도록 분리했다.
+
+        pull_messages()와 달리 내부 캐시(self._cache)를 갱신하지 않는다 —
+        이 조회는 "지금 이 순간의 서버 값을 확인"하는 것이 목적이며, 캐시는
+        pull_messages()/push_messages()의 CAS 기준으로만 쓰기 위해 분리해
+        둔다(캐시를 여기서 덮어쓰면 그 사이 다른 메시지의 CAS 판단이 이
+        1건짜리 조회 시점 기준으로 잘못 앞당겨질 수 있다).
+
+        조회 실패(비활성/네트워크 오류/RLS 등)나 해당 번호가 없으면 None을
+        반환한다 — 예외를 던지지 않는다(core/legacy_send_verification.py가
+        fetch_fn 실패를 구분해야 하므로, 실패 사유를 알고 싶다면 별도로
+        get_sync_status()/로그를 참고한다).
+        """
+        if not self.is_enabled():
+            return None
+
+        client_result = self._client_mgr.get_client()
+        if not client_result.success:
+            return None
+
+        try:
+            response = (
+                client_result.client.table(self._config.messages_table)
+                .select("message_number,text,updated_at,updated_by,version")
+                .eq("message_number", number)
+                .limit(1)
+                .execute()
+            )
+        except Exception as e:
+            logger.warning(f"메시지{number} 단건 조회 실패: {e}")
+            return None
+
+        rows = response.data or []
+        if not rows:
+            return None
+
+        row = rows[0]
+        try:
+            return MessageRecord(
+                number=int(row["message_number"]),
+                text=row.get("text", "") or "",
+                updated_at=row.get("updated_at", "") or "",
+                updated_by=row.get("updated_by", "") or "",
+                version=int(row.get("version") or 1),
+            )
+        except (KeyError, TypeError, ValueError):
+            logger.warning(f"메시지{number} 단건 조회 응답 형식 오류: {row!r}")
+            return None
+
     def push_messages(
         self,
         messages: dict,

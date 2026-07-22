@@ -24,6 +24,9 @@ class ControlPanel(ctk.CTkFrame):
         on_save_messages: Optional[Callable] = None,
         on_open_messages: Optional[Callable] = None,
         on_messages_changed: Optional[Callable[[], None]] = None,
+        on_message_focus: Optional[Callable[[int], None]] = None,
+        on_message_blur: Optional[Callable[[int], None]] = None,
+        on_refresh_shared_messages: Optional[Callable[[], None]] = None,
         log_callback: Optional[Callable[[str], None]] = None,
         **kwargs,
     ):
@@ -38,9 +41,20 @@ class ControlPanel(ctk.CTkFrame):
         # load_messages()로 프로그램이 값을 넣는 경우는 suppress_change_notifications()로
         # 억제되어 여기로 도달하지 않는다.
         self._cb_messages_changed = on_messages_changed or (lambda: None)
+        # Mobile 실시간 동기화 스프린트: 어느 message_no를 편집 중인지 알아야
+        # core.shared_message_coordinator가 "편집 중 원격 변경 보류" 판단을 할 수 있다
+        # (기존 on_messages_changed는 번호를 구분하지 않으므로 별도 콜백으로 추가했다 —
+        # 기존 콜백/동작은 그대로 둔다).
+        self._cb_message_focus = on_message_focus or (lambda n: None)
+        self._cb_message_blur = on_message_blur or (lambda n: None)
+        # 요구사항 15절 — 수동 새로고침(자동 Realtime과 별개로 전체 12개를 다시 불러와
+        # 정합성을 복구). shared_messages 연동이 없는 환경에서는 콜백이 비어 있어
+        # 버튼이 있어도 아무 일도 하지 않는다.
+        self._cb_refresh_shared_messages = on_refresh_shared_messages or (lambda: None)
         self._log = log_callback or (lambda msg: None)
 
         self._message_textboxes: dict[int, ctk.CTkTextbox] = {}
+        self._message_status_labels: dict[int, ctk.CTkLabel] = {}
         # load_messages() 등 프로그램이 값을 채워 넣는 동안 True — 이 동안에는
         # KeyRelease가 아닌 경로로 텍스트가 바뀌므로 원래 발생하지 않지만, 방어적으로
         # 한 번 더 억제한다(초기 로드/클라우드 반영/파일 불러오기 도중 자동저장 오발동 방지).
@@ -113,7 +127,16 @@ class ControlPanel(ctk.CTkFrame):
             height=26,
             width=100,
             command=self._cb_open_messages,
-        ).grid(row=0, column=1)
+        ).grid(row=0, column=1, padx=(0, 6))
+
+        ctk.CTkButton(
+            btn_frame,
+            text="메시지 새로고침",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
+            height=26,
+            width=100,
+            command=self._cb_refresh_shared_messages,
+        ).grid(row=0, column=2)
 
     def _create_message_area(self) -> None:
         self.msg_scroll = ctk.CTkScrollableFrame(self, corner_radius=8)
@@ -145,11 +168,28 @@ class ControlPanel(ctk.CTkFrame):
         row += 1
 
         for msg_num in group_info["messages"]:
+            header_row = ctk.CTkFrame(self.msg_scroll, fg_color="transparent")
+            header_row.grid(row=row, column=0, sticky="ew", padx=12, pady=(0, 2))
+            header_row.grid_columnconfigure(0, weight=1)
+
             ctk.CTkLabel(
-                self.msg_scroll,
+                header_row,
                 text=f"메시지 {msg_num}",
                 font=ctk.CTkFont(family=FONT_FAMILY, size=12),
-            ).grid(row=row, column=0, sticky="w", padx=12, pady=(0, 2))
+            ).grid(row=0, column=0, sticky="w")
+
+            # Mobile 실시간 동기화 스프린트: 메시지별 동기화 상태(동기화됨/저장 중/
+            # 오프라인 변경/충돌/재연결 중/서버 변경 수신)를 작은 라벨로 표시한다.
+            # 기본값은 빈 문자열 — shared_messages 연동이 비활성화된 환경(오프라인
+            # 전용 사용)에서는 아무 것도 표시하지 않는다(기존 UI와 동일하게 보임).
+            status_label = ctk.CTkLabel(
+                header_row,
+                text="",
+                font=ctk.CTkFont(family=FONT_FAMILY, size=10),
+                text_color="gray60",
+            )
+            status_label.grid(row=0, column=1, sticky="e")
+            self._message_status_labels[msg_num] = status_label
             row += 1
 
             textbox = ctk.CTkTextbox(
@@ -164,6 +204,11 @@ class ControlPanel(ctk.CTkFrame):
             # 없는 CTkTextbox(내부적으로 StringVar가 없는 tkinter Text 위젯)에서
             # "사용자가 실제로 입력했는지"를 감지하는 가장 안전한 방법이다.
             textbox.bind("<KeyRelease>", self._on_textbox_key_release)
+            # FocusIn/FocusOut으로 "지금 이 번호를 편집 중인지"를 구분한다(기존
+            # KeyRelease 바인딩과 별개 — 편집 중에는 Realtime 원격 변경을 즉시
+            # 덮어쓰지 않고 보류해야 하므로 message_no 단위 구분이 필요하다).
+            textbox.bind("<FocusIn>", lambda e, n=msg_num: self._on_textbox_focus_in(n))
+            textbox.bind("<FocusOut>", lambda e, n=msg_num: self._on_textbox_focus_out(n))
             self._message_textboxes[msg_num] = textbox
             row += 1
 
@@ -188,6 +233,16 @@ class ControlPanel(ctk.CTkFrame):
         if self._suppress_change_events:
             return
         self._cb_messages_changed()
+
+    def _on_textbox_focus_in(self, message_no: int) -> None:
+        if self._suppress_change_events:
+            return
+        self._cb_message_focus(message_no)
+
+    def _on_textbox_focus_out(self, message_no: int) -> None:
+        if self._suppress_change_events:
+            return
+        self._cb_message_blur(message_no)
 
     @contextlib.contextmanager
     def suppress_change_notifications(self):
@@ -225,3 +280,13 @@ class ControlPanel(ctk.CTkFrame):
         with self.suppress_change_notifications():
             for num, text in messages.items():
                 self.set_message(num, text)
+
+    def set_message_status(self, message_no: int, text: str, color: str = "gray60") -> None:
+        """메시지별 동기화 상태 라벨을 갱신한다(Mobile 실시간 동기화 스프린트).
+
+        core.shared_message_coordinator.MessageSyncState.status_label_ko를 그대로
+        넘기면 된다 — 이 메서드는 위젯에 반영만 하고 상태 판단 로직은 갖지 않는다.
+        """
+        label = self._message_status_labels.get(message_no)
+        if label is not None:
+            label.configure(text=text, text_color=color)

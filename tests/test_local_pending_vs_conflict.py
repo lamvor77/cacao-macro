@@ -228,25 +228,24 @@ class TestSyncOnceLoggingAndCounts(PendingVsConflictTestBase):
         self.assertTrue(coord._local_state[1].conflict is False)
         self.assertTrue(coord._local_state[2].conflict is True)
 
-    def test_10_single_local_edit_during_polling_is_pending_not_conflict(self):
-        """10. 로컬 수정 1개 후 polling → "충돌 1건"이 아니라 "대기 1건, 충돌 0건"."""
+    def test_10_single_local_edit_during_manual_refresh_is_pending_not_conflict(self):
+        """10. 로컬 수정 1개 후 수동 새로고침 → "충돌 1건"이 아니라 "대기 1건, 충돌 0건"."""
         recorder = _Recorder(initial_messages={1: "로컬에서 수정함"})
         cloud = FakeCloudSyncService(enabled=True)
         # 원격은 이 PC가 마지막으로 확인한 그대로 — 아무도 건드리지 않았다.
         cloud.pull_result = SyncResult(True, messages={1: MessageRecord(1, "이전 확인값", "t", "u", 1)})
         auth = FakeAuthService(logged_in=True, profile=_profile("approved", "editor"))
         coord = self.make_coordinator(recorder, cloud, auth)
-        coord._running = True
         coord._local_state[1] = _LocalMessageState(
             version=1, dirty=True, last_text="로컬에서 수정함", last_synced_text="이전 확인값",
         )
 
-        coord._poll_tick()
+        coord._do_manual_refresh()
 
         self.assertTrue(any("대기 1건, 충돌 0건" in m for m in recorder.logs))
         self.assertFalse(any("충돌 1건" in m and "대기 0건" in m for m in recorder.logs))
         self.assertNotEqual(coord.get_status().state, CloudState.CONFLICT)
-        self.assertEqual(cloud.push_calls, 0, "polling에서는 여전히 즉시 업로드하지 않아야 함")
+        self.assertEqual(cloud.push_calls, 0, "수동 새로고침에서는 여전히 즉시 업로드하지 않아야 함")
 
 
 if __name__ == "__main__":

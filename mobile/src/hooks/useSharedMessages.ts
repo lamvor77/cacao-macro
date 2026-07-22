@@ -8,7 +8,8 @@ import { supabase } from "../supabaseClient";
 import type { SharedMessageRow } from "../types";
 import type { MessageSyncState, RemoteMessageSnapshot } from "../syncLogic";
 import {
-  applyRemoteEvent, beginEdit as beginEditLogic, createInitialStates, discardEdit as discardEditLogic,
+  applyRemoteEvent, beginEdit as beginEditLogic, buildForceUpdateParams, buildUpdateParams,
+  createInitialStates, discardEdit as discardEditLogic,
   endEdit as endEditLogic, keepLocalAndDiscardRemote as keepLocalLogic,
   loadLatestAndDiscardEdit as loadLatestLogic, markConflict, markSaved, markSaving,
 } from "../syncLogic";
@@ -129,18 +130,17 @@ export function useSharedMessages(enabled: boolean) {
     setStates((prev) => ({ ...prev, [messageNo]: keepLocalLogic(prev[messageNo]) }));
   }, []);
 
-  const saveMessage = useCallback(async (messageNo: number, content: string, title: string | null) => {
+  // 모바일에서는 제목 입력 기능을 제공하지 않는다(요구사항) — RPC는 여전히
+  // p_title 파라미터를 필수로 받으므로 항상 null을 보낸다. SQL의
+  // update_shared_message가 "title = coalesce(p_title, title)"로 처리하므로,
+  // null을 보내면 서버에 이미 저장된 title(과거 PC에서 입력된 값 등)이 그대로
+  // 유지되고 지워지지 않는다 — DB 컬럼/기존 데이터는 건드리지 않는다.
+  const saveMessage = useCallback(async (messageNo: number, content: string) => {
     const state = statesRef.current[messageNo];
     const baseRevision = state.baseRevision ?? state.revision;
     setStates((prev) => ({ ...prev, [messageNo]: markSaving(prev[messageNo]) }));
 
-    const { data, error } = await supabase.rpc("update_shared_message", {
-      p_message_no: messageNo,
-      p_title: title,
-      p_content: content,
-      p_base_revision: baseRevision,
-      p_update_source: "mobile",
-    });
+    const { data, error } = await supabase.rpc("update_shared_message", buildUpdateParams(messageNo, content, baseRevision));
 
     if (error) {
       const message = error.message ?? "";
@@ -162,15 +162,10 @@ export function useSharedMessages(enabled: boolean) {
   // (서버가 fn_is_admin()으로 재검증 — 일반 직원이 호출하면 PERMISSION_DENIED).
   // 이 함수를 호출하는 버튼 자체를 일반 직원 화면에는 만들지 않는다(App.tsx의
   // role 분기 참고) — 이 함수가 있다는 사실만으로 권한이 생기지 않는다.
-  const forceSaveMessage = useCallback(async (messageNo: number, content: string, title: string | null) => {
+  const forceSaveMessage = useCallback(async (messageNo: number, content: string) => {
     setStates((prev) => ({ ...prev, [messageNo]: markSaving(prev[messageNo]) }));
 
-    const { data, error } = await supabase.rpc("force_update_shared_message", {
-      p_message_no: messageNo,
-      p_title: title,
-      p_content: content,
-      p_update_source: "admin_force",
-    });
+    const { data, error } = await supabase.rpc("force_update_shared_message", buildForceUpdateParams(messageNo, content));
 
     if (error) {
       const message = error.message ?? "";

@@ -274,17 +274,18 @@ class TestReconcilePolicy(CoordinatorTestBase):
 # ============================================================
 
 class TestConcurrencyAndLifecycle(CoordinatorTestBase):
-    def test_8_polling_skips_when_busy(self):
-        """8. 이전 polling이 끝나지 않았으면 중복 실행하지 않는다"""
+    def test_8_manual_refresh_skips_when_busy(self):
+        """8. 이전 새로고침/동기화가 끝나지 않았으면 중복 실행하지 않는다
+        (30초 상시 polling은 제거됐지만, 이 busy 가드는 수동 새로고침에 그대로
+        재사용된다)."""
         recorder = _Recorder()
         cloud = FakeCloudSyncService()
         auth = FakeAuthService(logged_in=True)
         coord = self.make_coordinator(recorder, cloud, auth)
 
-        coord._running = True  # _poll_tick()은 start()로 진입했을 때를 가정하므로 직접 설정
         coord._sync_busy.acquire()  # 이미 동기화 중인 상태를 흉내냄
         try:
-            coord._poll_tick()
+            coord._do_manual_refresh()
         finally:
             coord._sync_busy.release()
 
@@ -560,6 +561,192 @@ class TestAppUserGating(CoordinatorTestBase):
         self.assertEqual(cloud.push_calls, 0)
         saved = self._data_manager.load(coord._local_file)
         self.assertEqual(saved["messages"].get(1), "로그아웃 후 로컬 저장", "로그아웃 후에도 로컬 저장은 되어야 함")
+
+
+# ============================================================
+# 상시 pull polling 제거 확인 — 수동 새로고침/초기 동기화/발송 직전 검증
+# 외에는 pull_messages/pull_message가 호출되지 않아야 한다(요구사항 6/8절).
+# ============================================================
+
+class TestNoBackgroundPolling(CoordinatorTestBase):
+    def _make_fast_coordinator(self, recorder, cloud, auth, poll_interval=0.02, dirty_push_interval=0.05):
+        return CloudSyncCoordinator(
+            get_messages_fn=recorder.get_messages,
+            apply_messages_fn=recorder.apply_messages,
+            log_fn=recorder.log,
+            status_fn=recorder.status,
+            notify_scheduler_fn=recorder.notify_scheduler,
+            data_manager=self._data_manager,
+            cloud_service=cloud,
+            auth_service=auth,
+            poll_interval_seconds=poll_interval,
+            dirty_push_interval_seconds=dirty_push_interval,
+            state_dir=self._tmp_state_dir,
+        )
+
+    def test_no_dirty_messages_produce_no_pull_after_initial_sync(self):
+        """변경 전: 30초마다 pull이 계속 호출됨(테스트 시간 동안 여러 회).
+        변경 후: 초기 동기화 1회 외에는, dirty가 없는 한 시간이 얼마나 지나도
+        pull이 추가로 호출되지 않아야 한다."""
+        recorder = _Recorder(initial_messages={1: "안 바뀐 메시지"})
+        cloud = FakeCloudSyncService()
+        cloud.pull_result = SyncResult(True, messages={1: MessageRecord(1, "안 바뀐 메시지", "t", "u", 1)})
+        auth = FakeAuthService(logged_in=True)
+        coord = self._make_fast_coordinator(recorder, cloud, auth)
+
+        coord.start()
+        time.sleep(0.35)  # poll_interval(0.02s)/dirty_push_interval(0.05s) 기준 여러 tick이 지남
+        coord.stop(wait_seconds=1.0)
+
+        self.assertEqual(cloud.pull_calls, 1, "초기 동기화 1회 외에는 pull이 호출되면 안 됨")
+
+    def test_not_logged_in_makes_zero_network_calls_over_time(self):
+        recorder = _Recorder()
+        cloud = FakeCloudSyncService()
+        auth = FakeAuthService(logged_in=False)
+        coord = self._make_fast_coordinator(recorder, cloud, auth)
+
+        coord.start()
+        time.sleep(0.35)
+        coord.stop(wait_seconds=1.0)
+
+        self.assertEqual(cloud.pull_calls, 0)
+        self.assertEqual(cloud.push_calls, 0)
+
+    def test_dirty_message_is_only_pushed_via_15min_tick_not_pulled_repeatedly(self):
+        """dirty가 있어도 이 타이머는 push만 트리거할 뿐(15분 tick), pull을
+        추가로 호출하지 않는다."""
+        recorder = _Recorder(initial_messages={1: "수정한 값"})
+        cloud = FakeCloudSyncService()
+        cloud.pull_result = SyncResult(True, messages={})
+        auth = FakeAuthService(logged_in=True)
+        coord = self._make_fast_coordinator(recorder, cloud, auth)
+        coord._local_state[1] = _LocalMessageState(version=0, dirty=True, last_text="수정한 값")
+
+        coord.start()
+        time.sleep(0.35)
+        coord.stop(wait_seconds=1.0)
+
+        self.assertEqual(cloud.pull_calls, 1, "초기 동기화 1회 외 pull 없음")
+        self.assertGreaterEqual(cloud.push_calls, 1, "15분(테스트에서는 0.05초) dirty tick으로 push는 발생해야 함")
+
+    def test_manual_refresh_is_the_only_additional_pull_trigger(self):
+        recorder = _Recorder(initial_messages={1: "x"})
+        cloud = FakeCloudSyncService()
+        cloud.pull_result = SyncResult(True, messages={1: MessageRecord(1, "x", "t", "u", 1)})
+        auth = FakeAuthService(logged_in=True)
+        coord = self.make_coordinator(recorder, cloud, auth)
+
+        coord._initial_sync()
+        self.assertEqual(cloud.pull_calls, 1)
+
+        coord.request_manual_refresh()
+        for _ in range(50):
+            if cloud.pull_calls >= 2:
+                break
+            time.sleep(0.02)
+        self.assertEqual(cloud.pull_calls, 2)
+
+
+# ============================================================
+# 신규 메서드: push_single_message_sync / get_local_message_state / 편집 상태
+# (발송 직전 검증, gui/main_window.py가 사용)
+# ============================================================
+
+class TestPushSingleMessageSync(CoordinatorTestBase):
+    def test_success_updates_local_state_and_returns_true(self):
+        recorder = _Recorder(initial_messages={1: "새 내용"})
+        cloud = FakeCloudSyncService()
+        auth = FakeAuthService(logged_in=True)
+        coord = self.make_coordinator(recorder, cloud, auth)
+        # 실제 흐름과 동일하게, push 대상 내용이 이미 로컬 자동저장으로
+        # last_text에 반영돼 있는 상태를 흉내낸다(_mark_dirty가 하는 일).
+        coord._local_state[1] = _LocalMessageState(version=0, dirty=True, last_text="새 내용")
+
+        ok = coord.push_single_message_sync(1, "새 내용")
+
+        self.assertTrue(ok)
+        self.assertEqual(cloud.push_calls, 1)
+        self.assertFalse(coord._local_state[1].dirty)
+
+    def test_not_logged_in_returns_false_without_network(self):
+        recorder = _Recorder()
+        cloud = FakeCloudSyncService()
+        auth = FakeAuthService(logged_in=False)
+        coord = self.make_coordinator(recorder, cloud, auth)
+
+        ok = coord.push_single_message_sync(1, "x")
+
+        self.assertFalse(ok)
+        self.assertEqual(cloud.push_calls, 0)
+
+    def test_readonly_profile_returns_false(self):
+        recorder = _Recorder()
+        cloud = FakeCloudSyncService()
+        auth = FakeAuthService(logged_in=True, profile=_profile("approved", "viewer"))
+        coord = self.make_coordinator(recorder, cloud, auth)
+
+        ok = coord.push_single_message_sync(1, "x")
+
+        self.assertFalse(ok)
+        self.assertEqual(cloud.push_calls, 0)
+
+    def test_push_failure_returns_false(self):
+        recorder = _Recorder()
+        cloud = FakeCloudSyncService()
+        cloud.push_result_factory = lambda payload: SyncResult(False, error="network", error_code="connection_error")
+        auth = FakeAuthService(logged_in=True)
+        coord = self.make_coordinator(recorder, cloud, auth)
+
+        ok = coord.push_single_message_sync(1, "x")
+
+        self.assertFalse(ok)
+
+    def test_skips_when_another_push_already_in_progress(self):
+        recorder = _Recorder()
+        cloud = FakeCloudSyncService()
+        auth = FakeAuthService(logged_in=True)
+        coord = self.make_coordinator(recorder, cloud, auth)
+        coord._push_in_progress = True  # 다른 업로드가 진행 중인 상태를 흉내냄
+
+        ok = coord.push_single_message_sync(1, "x", timeout_seconds=0.2)
+
+        self.assertFalse(ok)
+        self.assertEqual(cloud.push_calls, 0)
+
+
+class TestLocalMessageStateAndEditing(CoordinatorTestBase):
+    def test_get_local_message_state_returns_defaults_for_unknown_message(self):
+        recorder = _Recorder()
+        coord = self.make_coordinator(recorder, FakeCloudSyncService(), FakeAuthService())
+        dirty, version, last_synced = coord.get_local_message_state(9)
+        self.assertEqual((dirty, version, last_synced), (False, 0, ""))
+
+    def test_get_local_message_state_reflects_local_state(self):
+        recorder = _Recorder()
+        coord = self.make_coordinator(recorder, FakeCloudSyncService(), FakeAuthService())
+        coord._local_state[2] = _LocalMessageState(version=3, dirty=True, last_synced_text="synced")
+        dirty, version, last_synced = coord.get_local_message_state(2)
+        self.assertEqual((dirty, version, last_synced), (True, 3, "synced"))
+
+    def test_begin_end_edit_tracks_per_message_state(self):
+        recorder = _Recorder()
+        coord = self.make_coordinator(recorder, FakeCloudSyncService(), FakeAuthService())
+
+        self.assertFalse(coord.is_editing(1))
+        coord.begin_edit(1)
+        self.assertTrue(coord.is_editing(1))
+        self.assertFalse(coord.is_editing(2), "다른 메시지는 영향받지 않아야 함")
+        coord.end_edit(1)
+        self.assertFalse(coord.is_editing(1))
+
+    def test_end_edit_without_begin_is_safe(self):
+        recorder = _Recorder()
+        coord = self.make_coordinator(recorder, FakeCloudSyncService(), FakeAuthService())
+        try:
+            coord.end_edit(5)
+        except Exception as e:
+            self.fail(f"begin_edit 없이 end_edit 호출 시 예외 발생: {e}")
 
 
 if __name__ == "__main__":

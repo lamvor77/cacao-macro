@@ -1,7 +1,9 @@
 # 관리자 패널 (빌드용 라이선스 발급)
 # MainWindow 제목표시줄의 "관리자 모드" 버튼으로 열리며, 열 때마다 비밀번호를 재확인한다.
-# 여기서 사용 기간을 정해 license_build.json을 생성하면, 이후 pyinstaller로
-# 빌드할 때 그 파일이 exe 안에 포함되어 배포된다 (core/license_manager.py 참고).
+# 여기서 사용 기간을 정해 license_build.json을 생성하면, 배포용 exe와 같은
+# 폴더에 그 파일을 배치해야 한다 — exe 내부에 포함되지 않으며, 재빌드 없이
+# 이 파일만 교체해도 라이선스 갱신이 반영된다 (core/license_manager.py의
+# get_external_license_path() 참고).
 
 import logging
 import tkinter.messagebox as messagebox

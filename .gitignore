@@ -18,6 +18,12 @@ storage/cloud_sync/
 !storage/.gitkeep
 !logs/.gitkeep
 
+# ===== 로컬 테스트 실행 환경(test-runtime) — 항상 로컬 전용 =====
+# .env, session.dat(암호화된 Supabase 세션/토큰), 로그, storage 캐시,
+# 테스트용 exe 사본까지 전부 포함되므로 통째로 제외한다
+# (scripts/setup_test_runtime.py가 dist/에서 다시 만들 수 있음).
+test-runtime/
+
 # ===== 에디터/OS =====
 .vscode/
 .idea/
@@ -25,3 +31,16 @@ Thumbs.db
 
 # ===== Claude Code 로컬 설정 (개인별 권한 기록, 공유하지 않음) =====
 .claude/settings.local.json
+
+# ===== 로컬 백업(비밀정보 포함 가능 — 항상 로컬 전용) =====
+backup/
+
+# ===== Release Candidate Sprint 1 =====
+# release/ 하위는 scripts/build_release.py가 dist/의 exe를 복사해 만드는
+# 배포 패키징 산출물이다(exe, license_build.json 사본, 체크섬 등 전부
+# 재생성 가능) — 대형 바이너리라 일반 Git에는 권장하지 않으므로 통째로
+# 제외한다.
+release/
+token*
+credentials*
+creds*

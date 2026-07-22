@@ -24,6 +24,7 @@ from config.settings import (
     ROOM_DELAY_MIN,
 )
 from core.message_sender import MessageSender
+from core.send_verification import SendMessageVerificationResult
 
 logger = logging.getLogger(__name__)
 
@@ -49,10 +50,23 @@ class AutoScheduler:
         get_rooms_fn: Callable[[], dict[str, bool]],
         get_messages_fn: Callable[[], dict[int, str]],
         log_fn: Callable[[str], None],
+        verify_message_fn: Optional[Callable[[int, str, int], SendMessageVerificationResult]] = None,
+        get_local_revision_fn: Optional[Callable[[int], int]] = None,
     ):
         self._get_rooms = get_rooms_fn
         self._get_messages = get_messages_fn
         self._log = log_fn
+        # Production Stabilization Sprint(요구사항 4절) — 그룹 발송 시작 직전, 그
+        # 그룹에 실제로 필요한 message_no 각각에 대해 개별 조회한다(전체 12건을
+        # 매번 조회하지 않음). 생략하면(None) 기존과 동일하게 검증 없이
+        # get_messages_fn() 스냅샷만 사용한다(레거시 동작 완전 보존, 요구사항 12).
+        # 시그니처: verify_message_fn(message_no, local_content, local_revision)
+        #   -> core.send_verification.SendMessageVerificationResult
+        # 호출부(gui/main_window.py)가 실패해도 항상 결과 객체를 반환하도록
+        # 설계되어 있다 — 이 클래스는 정책(block/cached) 판단을 하지 않고 결과의
+        # allowed/content만 그대로 따른다(정책 자체는 verify_message_fn 내부 책임).
+        self._verify_message = verify_message_fn
+        self._get_local_revision = get_local_revision_fn or (lambda n: 0)
         self._sender = MessageSender()
 
         self._running = False
@@ -150,20 +164,49 @@ class AutoScheduler:
             self._log("[경고] 발송 대상 단톡방이 없습니다.")
             return
 
+        # Production Stabilization Sprint(요구사항 4절) — 그룹 시작 시점 스냅샷을 뜨기
+        # "직전"에 이 그룹이 실제로 쓸 message_no만, 한 건씩 서버 최신 상태를
+        # 확인한다(전체 12건 조회 아님). verify_message_fn이 없으면(None) 완전히
+        # 기존과 동일하게 검증 없이 진행한다(레거시 동작 보존, 요구사항 12).
+        #
+        # 한 message_no의 검증 실패(block 정책)는 "그 메시지 하나만" 이번 발송에서
+        # 제외한다 — 그룹 전체를 취소하거나 스케줄러를 중단하지 않는다(완료 기준 7).
+        verified_contents: dict[int, str] = {}
+        for num in group_info["messages"]:
+            local_content = messages.get(num, "")
+            if self._verify_message is not None:
+                try:
+                    result = self._verify_message(num, local_content, self._get_local_revision(num))
+                except Exception as e:
+                    logger.exception(f"발송 직전 검증 훅 자체 오류(message_no={num}) — 이 메시지는 제외하고 계속 진행")
+                    self._log(f"[오류] 발송 직전 검증 훅 오류로 메시지 제외 — message_no={num}: {type(e).__name__}")
+                    continue
+                if not result.allowed:
+                    self._log(
+                        f"[경고] 발송 보류(서버 확인 실패, block 정책) — message_no={num}, "
+                        f"오류={result.error_code.value if result.error_code else '알 수 없음'}"
+                    )
+                    continue
+                if result.used_cached_content:
+                    self._log(f"[경고] 캐시 내용으로 발송(cached 정책) — message_no={num}")
+                verified_contents[num] = result.content
+            else:
+                verified_contents[num] = local_content
+
         # ===== 메시지 스냅샷 =====
-        # 그룹 시작 시점의 메시지 3개를 불변 튜플로 고정한다. 아래 try 블록이
-        # 끝날 때까지(=이 그룹의 모든 단톡방 발송이 끝날 때까지) 이 스냅샷만
+        # 검증(또는 검증 생략)을 마친 시점의 메시지를 불변 튜플로 고정한다. 아래 try
+        # 블록이 끝날 때까지(=이 그룹의 모든 단톡방 발송이 끝날 때까지) 이 스냅샷만
         # 사용하며 get_messages_fn()을 다시 호출하지 않는다 — 그룹 발송 도중
         # UI나 클라우드에서 메시지가 바뀌어도 현재 발송에는 영향이 없고,
         # 다음 그룹(또는 다음 동일 그룹) 발송부터 최신 메시지가 적용된다.
         # (클라우드 변경 도착 시의 로그 안내는 notify_cloud_update() 참고)
         group_messages: tuple[tuple[int, str], ...] = tuple(
-            (num, messages.get(num, ""))
+            (num, verified_contents[num])
             for num in group_info["messages"]
-            if messages.get(num, "").strip()
+            if verified_contents.get(num, "").strip()
         )
         if not group_messages:
-            self._log(f"[경고] Group {group_key} 메시지가 모두 비어 있습니다.")
+            self._log(f"[경고] Group {group_key} 메시지가 모두 비어 있거나 검증에서 제외되었습니다.")
             return
 
         fail_count = 0  # 연속 실패 단톡방 카운트

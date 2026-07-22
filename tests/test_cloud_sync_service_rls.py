@@ -129,7 +129,7 @@ def _make_service(current_uid, can_edit):
     mgr = FakeRLSClientManager(client)
     cfg = CloudConfig(
         enabled=True, url="https://project.supabase.co", anon_key="anon-key",
-        sync_interval_seconds=30, device_id="pc-fallback-device",
+        device_id="pc-fallback-device",
     )
     cache_dir = tempfile.mkdtemp(prefix="cacao_rls_cache_")
     _TMP_CACHE_DIRS.append(cache_dir)

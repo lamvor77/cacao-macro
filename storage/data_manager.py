@@ -7,9 +7,20 @@ import logging
 import os
 import shutil
 import sys
+from datetime import datetime
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+def default_room_list_filename(now: Optional[datetime] = None) -> str:
+    """단톡방 목록 저장 대화상자의 기본 파일명을 만든다.
+
+    예: 카카오톡_단톡방목록_20260721_153000.json
+    now를 주입할 수 있게 해 시각에 의존하지 않고 단위 테스트할 수 있다.
+    """
+    now = now or datetime.now()
+    return f"카카오톡_단톡방목록_{now.strftime('%Y%m%d_%H%M%S')}.json"
 
 
 def get_storage_dir() -> str:

@@ -138,3 +138,28 @@ export function loadLatestAndDiscardEdit(state: MessageSyncState): MessageSyncSt
 export function keepLocalAndDiscardRemote(state: MessageSyncState): MessageSyncState {
   return { ...state, pendingRemote: null, status: state.isEditing ? "offline_pending" : state.status };
 }
+
+// ===== update_shared_message / force_update_shared_message RPC 파라미터 =====
+// 모바일은 제목 입력 기능을 제공하지 않는다 — p_title은 항상 null로 보낸다.
+// SQL의 update_shared_message가 "title = coalesce(p_title, title)"로 처리하므로
+// null을 보내도 서버에 이미 저장된 title(과거 PC 입력값 등)은 지워지지 않는다.
+// supabase를 import하지 않는 순수 함수라 훅을 렌더링하지 않고도 테스트할 수 있다.
+
+export function buildUpdateParams(messageNo: number, content: string, baseRevision: number) {
+  return {
+    p_message_no: messageNo,
+    p_title: null,
+    p_content: content,
+    p_base_revision: baseRevision,
+    p_update_source: "mobile",
+  };
+}
+
+export function buildForceUpdateParams(messageNo: number, content: string) {
+  return {
+    p_message_no: messageNo,
+    p_title: null,
+    p_content: content,
+    p_update_source: "admin_force",
+  };
+}

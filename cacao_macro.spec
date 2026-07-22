@@ -1,18 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
-import os
 from PyInstaller.utils.hooks import collect_data_files
 
 datas = []
 datas += collect_data_files('customtkinter')
 
-# 관리자 모드에서 발급한 빌드용 라이선스 파일을 exe에 포함시킨다.
-# (관리자 모드 > 빌드용 파일 생성으로 먼저 만들어 두어야 한다. 없으면 빌드 시 오류.)
-if not os.path.exists('license_build.json'):
-    raise FileNotFoundError(
-        "license_build.json이 없습니다. 먼저 프로그램의 관리자 모드에서 "
-        "사용 기간을 정해 빌드용 파일을 생성한 뒤 다시 빌드하세요."
-    )
-datas += [('license_build.json', '.')]
+# License Externalization Sprint: license_build.json을 더 이상 datas로 exe
+# 내부에 포함시키지 않는다 — exe와 같은 폴더에 두는 외부 파일이다
+# (core/license_manager.py의 get_external_license_path() 참고). 이렇게 해야
+# 라이선스를 갱신할 때 이 exe를 재빌드하지 않고 파일 교체만으로 반영된다.
+# 배포 시에는 dist/ 폴더에 cacao_macro.exe와 함께 .env, license_build.json을
+# 수동으로 배치해야 한다(docs/license_deployment_guide.md 참고).
 
 
 a = Analysis(

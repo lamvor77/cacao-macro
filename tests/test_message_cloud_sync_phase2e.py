@@ -528,18 +528,20 @@ class TestInputInProgressGating(Phase2ETestBase):
 # 폴링(30초) 자체는 더 이상 dirty 메시지를 즉시 업로드하지 않는다 (원칙 5/8)
 # ============================================================
 
-class TestPollingNoLongerPushes(Phase2ETestBase):
-    def test_poll_tick_does_not_push_dirty_messages(self):
-        recorder = _Recorder(initial_messages={1: "폴링 중 dirty"})
+class TestManualRefreshNoLongerPushes(Phase2ETestBase):
+    """상시 30초 polling은 제거됐지만, 그 자리를 대신하는 수동 새로고침도
+    동일한 원칙(조회만, 업로드는 명시적 이벤트 전용)을 지켜야 한다."""
+
+    def test_manual_refresh_does_not_push_dirty_messages(self):
+        recorder = _Recorder(initial_messages={1: "새로고침 중 dirty"})
         cloud = FakeCloudSyncService(enabled=True)
         auth = FakeAuthService(logged_in=True, profile=_profile("approved", "editor"))
         coord = self.make_coordinator(recorder, cloud, auth)
-        coord._running = True
-        coord._local_state[1] = _LocalMessageState(version=1, dirty=True, last_text="폴링 중 dirty")
+        coord._local_state[1] = _LocalMessageState(version=1, dirty=True, last_text="새로고침 중 dirty")
 
-        coord._poll_tick()
+        coord._do_manual_refresh()
 
-        self.assertEqual(cloud.push_calls, 0, "30초 폴링에서는 더 이상 즉시 업로드하지 않아야 함")
+        self.assertEqual(cloud.push_calls, 0, "수동 새로고침에서는 즉시 업로드하지 않아야 함(조회 전용)")
         self.assertTrue(coord.has_cloud_dirty(), "dirty 상태는 15분 tick을 위해 유지되어야 함")
 
 

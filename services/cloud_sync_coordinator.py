@@ -34,12 +34,18 @@ from datetime import datetime, timezone
 from typing import Callable, Optional
 
 from config.cloud_settings import get_cloud_config, get_message_sync_config
+from core.legacy_send_verification import MessageClassification, classify_message
 from services.auth_service import AppUserProfile, AuthService
 from services.cloud_state import CloudState, CloudStatusInfo
 from services.cloud_sync_service import CloudSyncService, MessageRecord, SyncResult
 from storage.data_manager import DataManager
 
 logger = logging.getLogger(__name__)
+
+# 상시 30초 pull polling 제거 이후, 이 값은 순수 내부 타이머 tick 간격일 뿐이다
+# (15분 dirty push 스케줄 확인 + stop() 반응성 목적) — 네트워크를 트리거하지
+# 않으므로 더 이상 .env로 설정할 이유가 없다(요구사항 5절).
+_DEFAULT_TICK_INTERVAL_SECONDS = 30.0
 
 
 @dataclass
@@ -141,11 +147,22 @@ class CloudSyncCoordinator:
         )
 
         config = get_cloud_config()
-        self._poll_interval = poll_interval_seconds or config.sync_interval_seconds
+        # 상시 30초 pull polling을 제거하면서 이 값은 더 이상 "얼마나 자주
+        # 서버를 조회할지"가 아니다 — 아래 15분 dirty push 타이머와 stop()
+        # 반응성을 위한 내부 tick 간격일 뿐이며, 이 tick 자체는 네트워크를
+        # 전혀 호출하지 않는다(요구사항 3/6절). 그래서 CloudConfig가 아니라
+        # 이 모듈의 내부 상수를 기본값으로 쓴다 — 더 이상 사용자가 .env로
+        # 설정할 값이 아니기 때문이다.
+        self._poll_interval = poll_interval_seconds or _DEFAULT_TICK_INTERVAL_SECONDS
         self._device_id = config.device_id
         self._local_file = os.path.join(state_dir, "messages.json")
         self._local_state_file = os.path.join(state_dir, "local_sync_state.json")
         self._local_state: dict[int, _LocalMessageState] = self._load_local_state()
+        # 요구사항 4절 — 메시지별 편집 중 여부(shared_messages의 SharedMessageCoordinator와
+        # 동일한 목적, legacy 전용 별도 추적). REMOTE_APPLY 상황에서 이 메시지를
+        # 사용자가 지금 편집 중이면 조용히 덮어쓰지 않고 발송 자체를 중단한다
+        # (core/legacy_send_verification.py의 EDIT_IN_PROGRESS).
+        self._editing_numbers: set = set()
 
         # Phase 2E: 로컬 자동 저장 + 클라우드 조건부(15분) 동기화 설정.
         msg_config = get_message_sync_config()
@@ -369,14 +386,24 @@ class CloudSyncCoordinator:
     def on_logout(self) -> None:
         """로그아웃 직후(MainWindow) 호출한다 — 상태를 즉시 로그인 필요로 전환한다.
 
-        폴링 스레드 자체는 멈추지 않는다 — 다음 폴링 틱부터 is_logged_in() 검사에서
-        자동으로 건너뛰어지므로 실질적으로 멈춘 것과 같다. stop()은 프로그램
+        백그라운드 타이머 스레드 자체는 멈추지 않는다 — 15분 dirty tick이나
+        수동 새로고침/발송 직전 검증이 is_logged_in() 검사에서 자동으로
+        건너뛰어지므로 실질적으로 멈춘 것과 같다(요구사항 6절 — 로그아웃
+        상태에서는 어떤 경로로도 네트워크 요청이 0회여야 함). stop()은 프로그램
         종료 전용으로 남겨둔다(재로그인 시 스레드를 다시 만들 필요가 없어진다).
         """
         self._set_status(CloudState.LOGIN_REQUIRED)
         self._log("[INFO] 로그아웃 — 클라우드 동기화를 중지합니다 (로그인 필요 상태)")
 
-    # ===== 내부: 폴링 루프 =====
+    # ===== 내부: 백그라운드 루프 =====
+    #
+    # 상시 30초 pull polling을 제거했다(요구사항) — 이 루프는 더 이상 주기적으로
+    # 서버를 조회하지 않는다. 유일하게 남은 주기 작업은 15분 dirty push
+    # 검사뿐이며, 그것도 dirty가 없으면 네트워크를 전혀 호출하지 않는다
+    # (_tick_dirty_cloud_sync, 요구사항 7/6). 로그인 직후 1회(_initial_sync),
+    # 수동 새로고침(request_manual_refresh), 저장 재시도(기존 push CAS),
+    # 발송 직전(core/legacy_send_verification.py)만 실제로 서버를 조회한다
+    # (요구사항 2 — 충돌 재평가 트리거를 이 4곳으로 제한).
 
     def _run_loop(self) -> None:
         self._initial_sync()
@@ -384,7 +411,6 @@ class CloudSyncCoordinator:
         while self._running:
             if self._stop_event.wait(self._poll_interval):
                 break  # stop()이 호출됨
-            self._poll_tick()
             if time.monotonic() >= next_dirty_check:
                 self._tick_dirty_cloud_sync()
                 next_dirty_check = time.monotonic() + self._dirty_push_interval
@@ -425,30 +451,113 @@ class CloudSyncCoordinator:
             return
         self._sync_once(is_initial=True, can_write=profile.can_write, current_user_id=profile.id)
 
-    def _poll_tick(self) -> None:
-        if not self._running:
-            return
+    def request_manual_refresh(self) -> None:
+        """수동 새로고침 버튼에서 호출한다(legacy 쪽, 요구사항 2/4절) — 전체
+        12건을 1회 pull해 정합성을 다시 확인한다. 이전 새로고침/초기 동기화가
+        아직 끝나지 않았으면 건너뛴다(기존 30초 폴링과 동일한 busy 가드 재사용).
+        즉시 반환한다 — 실제 조회는 백그라운드 스레드에서 수행한다.
+        """
+        threading.Thread(target=self._do_manual_refresh, daemon=True).start()
+
+    def _do_manual_refresh(self) -> None:
         if not (self._cloud.is_enabled() and self._auth.is_logged_in()):
-            self._log("[DEBUG] polling 건너뜀 — 클라우드 미설정 또는 로그인 필요")
+            self._log("[INFO] 레거시 메시지 수동 새로고침 건너뜀 — 클라우드 미설정 또는 로그인 필요")
             return
         if not self._sync_busy.acquire(blocking=False):
-            self._log("[INFO] polling 건너뜀 — 이전 동기화가 아직 진행 중")
+            self._log("[INFO] 레거시 메시지 수동 새로고침 건너뜀 — 이전 동기화가 아직 진행 중")
             return
         try:
-            self._log("[INFO] polling 시작")
+            self._log("[INFO] 레거시 메시지 수동 새로고침 시작")
             profile = self._resolve_profile_or_halt()
             if profile is not None:
-                # allow_reconcile_push=False: 30초 폴링에서는 더 이상 dirty 메시지를
-                # 즉시 업로드하지 않는다(원칙 5) — 업로드는 15분 조건부 tick과
-                # 명시적 이벤트(저장/발송시작/종료)에서만 수행한다. pull(적용/충돌
-                # 감지)은 기존과 동일하게 30초마다 수행한다(원칙 8).
+                # allow_reconcile_push=False: 새로고침은 "조회"가 목적이다 — 로컬
+                # 미저장 변경을 함께 업로드하지 않는다(업로드는 저장 버튼/발송
+                # 시작·종료/15분 조건부 tick 등 명시적 이벤트 전용, 요구사항 5절).
                 self._sync_once(
                     is_initial=False, can_write=profile.can_write,
                     current_user_id=profile.id, allow_reconcile_push=False,
                 )
-            self._log("[INFO] polling 완료")
+            self._log("[INFO] 레거시 메시지 수동 새로고침 완료")
         finally:
             self._sync_busy.release()
+
+    def push_single_message_sync(self, message_no: int, content: str, timeout_seconds: float = 10.0) -> bool:
+        """발송 직전 검증 전용(core/legacy_send_verification.py의 LOCAL_PENDING
+        케이스) — 동기적으로 즉시 push하고 성공 여부만 반환한다. 이미 스케줄러
+        자신의 백그라운드 스레드에서 호출되므로 블로킹해도 안전하다.
+
+        request_push()의 비동기 직렬화 큐와는 별개 경로이지만, 동시에 두
+        업로드가 로컬 상태를 동시에 건드리지 않도록 같은 _push_lock/
+        _push_in_progress로 상호 배제한다 — 이미 다른 업로드가 진행 중이면
+        새로 큐잉하지 않고 바로 실패를 반환한다(발송 직전이라는 특성상 대기가
+        길어지면 안 되므로, 실패 시 스케줄러가 그 메시지 하나만 이번 발송에서
+        제외한다).
+        """
+        if not (self._cloud.is_enabled() and self._auth.is_logged_in()):
+            return False
+
+        acquired = self._push_lock.acquire(timeout=timeout_seconds)
+        if not acquired:
+            self._log(f"[경고] 발송 직전 push 대기 시간 초과 — message_no={message_no}")
+            return False
+        try:
+            if self._push_in_progress:
+                self._log(f"[경고] 다른 업로드가 진행 중이라 발송 직전 push를 건너뜁니다 — message_no={message_no}")
+                return False
+            self._push_in_progress = True
+        finally:
+            self._push_lock.release()
+
+        try:
+            profile = self._resolve_profile_or_halt()
+            if profile is None or not profile.can_write:
+                return False
+            result = self._cloud.push_messages({message_no: content}, updated_by=profile.id, device_id=self._device_id)
+            if not result.success or message_no not in result.updated:
+                return False
+            self._mark_synced_after_push(result, {message_no: content})
+            return True
+        finally:
+            with self._push_lock:
+                self._push_in_progress = False
+                self._pending_push_reason = None
+
+    def get_local_message_state(self, message_no: int) -> tuple:
+        """발송 직전 검증(core/legacy_send_verification.py)이 필요로 하는
+        (dirty, version, last_synced_text)만 읽기 전용으로 노출한다."""
+        state = self._local_state.get(message_no)
+        if state is None:
+            return False, 0, ""
+        return state.dirty, state.version, state.last_synced_text
+
+    # --- 편집 중 상태(메시지별, 요구사항 4절) ---
+
+    def begin_edit(self, message_no: int) -> None:
+        self._editing_numbers.add(message_no)
+
+    def end_edit(self, message_no: int) -> None:
+        self._editing_numbers.discard(message_no)
+
+    def is_editing(self, message_no: int) -> bool:
+        return message_no in self._editing_numbers
+
+    # --- 발송 직전 검증 지원(core/legacy_send_verification.py) ---
+
+    def pull_message(self, message_no: int) -> Optional[MessageRecord]:
+        """CloudSyncService.pull_message()에 대한 얇은 패스스루(단건 조회) —
+        gui/main_window.py가 CloudSyncService 내부를 직접 참조하지 않도록
+        coordinator를 통해서만 접근하게 한다(기존 설계 원칙과 동일)."""
+        return self._cloud.pull_message(message_no)
+
+    def record_remote_applied(self, message_no: int, version: int, text: str) -> None:
+        """발송 직전 검증이 REMOTE_APPLY로 판정해 화면에 원격 내용을 반영한
+        뒤 호출한다 — 로컬 동기화 상태를 그 반영과 일치시켜, 다음 조회에서
+        같은 메시지가 다시 REMOTE_APPLY로 잘못 판정되지 않게 한다."""
+        self._local_state[message_no] = _LocalMessageState(
+            version=version, updated_at=_now_iso(), dirty=False,
+            last_text=text, last_synced_text=text, conflict=False,
+        )
+        self._save_local_state()
 
     def _resolve_profile_or_halt(self) -> Optional[AppUserProfile]:
         """app_users 프로필을 조회해 pending/blocked/조회실패를 걸러낸다.
@@ -639,6 +748,12 @@ class CloudSyncCoordinator:
         판정해, 내가 15분 대기 중 push한 내용이 아직 로컬에 반영 안 됐을 뿐인
         정상 상황도 무조건 충돌로 잘못 집계했다 — last_synced_text 비교를
         추가해 "원격이 실제로 다른 값으로 바뀌었는지"를 직접 확인한다.
+
+        이 판정 로직 자체는 core/legacy_send_verification.py의 classify_message()로
+        옮겨졌다(요구사항 1절 — 30초 재폴링을 전제로 한 부분을 이벤트 기반으로
+        재설계) — 여기서는 이 메서드를 12개 메시지에 대해 반복 호출할 뿐이고,
+        발송 직전 검증도 같은 함수를 메시지 1건에 대해 호출한다. 판정 규칙
+        자체는 완전히 동일하다(로직 이동, 변경 없음).
         """
         to_apply: dict = {}
         to_push: list = []
@@ -652,25 +767,25 @@ class CloudSyncCoordinator:
             cloud_rec = cloud.get(n)
             local_text = local.get(n, "")
 
-            if cloud_rec is None:
-                if local_text.strip():
-                    to_push.append(n)
-                continue
+            classification = classify_message(
+                dirty=state.dirty, local_version=state.version, last_synced_text=state.last_synced_text,
+                local_text=local_text,
+                cloud_version=cloud_rec.version if cloud_rec is not None else None,
+                cloud_text=cloud_rec.text if cloud_rec is not None else None,
+            )
 
-            if not state.dirty:
-                if cloud_rec.version > state.version:
-                    to_apply[n] = cloud_rec.text
-                continue
-
-            if local_text == cloud_rec.text:
+            if classification == MessageClassification.PUSH:
+                to_push.append(n)
+            elif classification == MessageClassification.REMOTE_APPLY:
+                to_apply[n] = cloud_rec.text
+            elif classification == MessageClassification.IDENTICAL:
                 identical.append(n)
-                continue
-
-            if cloud_rec.version <= state.version or cloud_rec.text == state.last_synced_text:
+            elif classification == MessageClassification.LOCAL_PENDING:
                 to_push.append(n)
                 pending.append(n)
-            else:
+            elif classification == MessageClassification.CONFLICT:
                 conflicts.append(n)
+            # NOOP: 할 일 없음
 
         return to_apply, to_push, conflicts, pending, identical
 

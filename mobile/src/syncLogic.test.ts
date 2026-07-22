@@ -59,6 +59,14 @@ describe("applyRemoteEvent", () => {
     const next = applyRemoteEvent(state, snap({ revision: 2, content: "v2" }));
     expect(next.content).toBe("v2");
   });
+
+  it("과거(PC 등)에 입력된 title이 있는 기존 데이터도 오류 없이 반영된다 — 모바일이 title을 직접 다루지 않아도 됨", () => {
+    const state = createInitialState(1);
+    const next = applyRemoteEvent(state, snap({ revision: 1, content: "본문", title: "예전에 PC에서 입력한 제목" }));
+    expect(next.content).toBe("본문");
+    expect(next.title).toBe("예전에 PC에서 입력한 제목");
+    expect(next.status).toBe("synced");
+  });
 });
 
 describe("edit lifecycle", () => {

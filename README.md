@@ -19,11 +19,13 @@ Windows API에 의존).
 ```
 project/
 ├── main.py              진입점 (중복실행 방지 → 로그 설정 → 라이선스 확인 → GUI 실행)
-├── config/               상수/환경설정 (settings.py, cloud_settings.py)
-├── core/                 카카오톡 제어, 메시지 전송, 자동발송 스케줄러
+├── config/               상수/환경설정 (settings.py, cloud_settings.py, version.py)
+├── core/                 카카오톡 제어, 메시지 전송, 자동발송 스케줄러, 동기화 상태 기계
 ├── gui/                  CustomTkinter 기반 UI
-├── services/             클라우드 동기화 서비스 계층 (선택 기능, Phase 2)
+├── services/             클라우드 동기화/백업/진단/공유 메시지 서비스 계층
 ├── storage/              로컬 JSON 저장/불러오기
+├── mobile/               내부 직원용 모바일 메시지 편집 PWA (Vite+React+TS, 별도 프로젝트)
+├── scripts/              릴리스 패키징 등 빌드 도구
 ├── tests/                단위 테스트 (mock/fake만 사용, 실제 Supabase 연결 없음)
 ├── docs/                 설계 문서
 └── logs/                 실행 로그
@@ -55,6 +57,18 @@ SUPABASE_DEVICE_ID=
 - `SUPABASE_ANON_KEY`만 사용한다. `service_role` key는 절대 데스크톱 앱에 넣지 않는다.
 - 실제 접근 제어는 Supabase RLS(Row Level Security)와 로그인 세션으로 이루어진다.
 
+## 모바일 메시지 편집 (내부 직원용, Mobile 실시간 동기화 스프린트)
+
+`mobile/` 폴더의 별도 웹(PWA)에서 1~12번 메시지의 제목/내용을 조회·수정할 수
+있다. PC 프로그램의 실행 방식과 카카오톡 발송 방식은 전혀 바뀌지 않는다 —
+모바일은 메시지 "내용"만 편집하고, 실제 발송은 항상 PC에서만 기존 방식대로
+수행한다. PC와 모바일은 Supabase `shared_messages` 테이블을 통해 Realtime으로
+양방향 동기화된다(30초/60초 폴링 없음 — 실제 변경이 있을 때만 이벤트가 온다).
+
+자세한 내용은 [docs/mobile_message_editor.md](docs/mobile_message_editor.md),
+동기화 구조는 [docs/realtime_sync.md](docs/realtime_sync.md),
+DB 마이그레이션은 [docs/database_migration.md](docs/database_migration.md) 참고.
+
 ## 테스트
 
 ```powershell
@@ -63,9 +77,25 @@ python -m unittest discover -s tests -v
 
 모든 테스트는 fake/mock으로 동작하며 실제 Supabase 프로젝트에 연결하지 않는다.
 
+모바일(`mobile/`)은 별도 Node.js 프로젝트다:
+
+```powershell
+cd mobile
+npm install
+npm run typecheck
+npm test
+npm run build
+```
+
 ## 문서
 
 - [docs/PHASE2_CLOUD_SPEC.md](docs/PHASE2_CLOUD_SPEC.md) — Phase 2 전체 설계(로컬 서비스 계층, Phase 2A)
 - [docs/PHASE2B_ROLES_AUTH_SPEC.md](docs/PHASE2B_ROLES_AUTH_SPEC.md) — 역할/인증/이력 설계 (Phase 2B)
 - [docs/PHASE2C_DESKTOP_INTEGRATION.md](docs/PHASE2C_DESKTOP_INTEGRATION.md) — PC 프로그램 실연동 (Phase 2C)
 - [docs/PHASE2D_GOOGLE_OAUTH.md](docs/PHASE2D_GOOGLE_OAUTH.md) — Google 로그인(PKCE) 구현 + Supabase 설정 방법 (Phase 2D)
+- [docs/license_deployment_guide.md](docs/license_deployment_guide.md) — 라이선스 배포/갱신 절차
+- [docs/mobile_message_editor.md](docs/mobile_message_editor.md) — 모바일 접속/사용/직원 계정 승인 방법
+- [docs/realtime_sync.md](docs/realtime_sync.md) — PC↔모바일 Realtime 동기화 구조, 충돌/오프라인 처리
+- [docs/database_migration.md](docs/database_migration.md) — shared_messages 스키마 적용 + 초기 데이터 이전
+- [docs/operations_guide.md](docs/operations_guide.md) — 운영 전반(백업/복구/진단/배포/롤백)
+- [docs/troubleshooting.md](docs/troubleshooting.md) — 자주 발생하는 문제와 해결 방법
