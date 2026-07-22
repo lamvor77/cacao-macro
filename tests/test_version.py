@@ -54,8 +54,8 @@ class TestVersionResolution(unittest.TestCase):
     def test_frozen_mode_without_env_uses_safe_fallback(self):
         with patch.object(sys, "frozen", True, create=True):
             mod = _reload_version_module()
-            self.assertEqual(mod.APP_VERSION, "1.0.0-rc.1")
-            self.assertEqual(mod.BUILD_CHANNEL, "release-candidate")
+            self.assertEqual(mod.APP_VERSION, "1.2.1")
+            self.assertEqual(mod.BUILD_CHANNEL, "stable")
 
     def test_env_var_overrides_even_in_dev_mode(self):
         os.environ["CACAO_MACRO_VERSION"] = "9.9.9-test"
@@ -108,11 +108,11 @@ class TestVersionComparison(unittest.TestCase):
     """RC와 정식 버전 비교 / 잘못된 버전 처리"""
 
     def test_rc_is_older_than_release(self):
-        self.assertTrue(is_newer_version("1.0.0-rc.1", "1.0.0"))
+        self.assertTrue(is_newer_version("2.0.0-rc.1", "2.0.0"))
 
     def test_release_is_newer_than_next_rc_of_same_version(self):
-        # 1.0.0(정식) 다음에 나온 1.0.1-rc.1은 여전히 더 새 버전이다.
-        self.assertTrue(is_newer_version("1.0.0", "1.0.1-rc.1"))
+        # 2.0.0(정식) 다음에 나온 2.0.1-rc.1은 여전히 더 새 버전이다.
+        self.assertTrue(is_newer_version("2.0.0", "2.0.1-rc.1"))
 
     def test_patch_ordering_is_numeric_not_lexicographic(self):
         # 문자열 비교였다면 "1.0.10" < "1.0.9"로 잘못 판정된다.
@@ -120,7 +120,7 @@ class TestVersionComparison(unittest.TestCase):
         self.assertFalse(is_newer_version("1.0.10", "1.0.9"))
 
     def test_same_version_is_not_newer(self):
-        self.assertFalse(is_newer_version("1.0.0-rc.1", "1.0.0-rc.1"))
+        self.assertFalse(is_newer_version("2.0.0-rc.1", "2.0.0-rc.1"))
 
     def test_older_candidate_is_not_newer(self):
         self.assertFalse(is_newer_version("1.0.1", "1.0.0"))
@@ -143,7 +143,7 @@ class TestVersionComparison(unittest.TestCase):
         self.assertEqual(compare_versions("garbage", "1.0.0"), 0)
 
     def test_parse_version_safe_valid(self):
-        self.assertIsNotNone(parse_version_safe("1.0.0-rc.1"))
+        self.assertIsNotNone(parse_version_safe("2.0.0-rc.1"))
 
     def test_parse_version_safe_invalid_returns_none(self):
         self.assertIsNone(parse_version_safe("not.a.version!!"))
@@ -169,15 +169,15 @@ class TestVersionManifestLoading(unittest.TestCase):
             _os.makedirs(release_dir)
             with open(_os.path.join(release_dir, "version.json"), "w", encoding="utf-8") as f:
                 json.dump({
-                    "version": "1.0.0-rc.1",
-                    "channel": "release-candidate",
+                    "version": "2.0.0-rc.1",
+                    "channel": "beta",
                     "published_at": "2026-07-18T00:00:00",
-                    "minimum_supported_version": "1.0.0-rc.1",
+                    "minimum_supported_version": "2.0.0-rc.1",
                 }, f)
             info = load_version_manifest(tmp)
             self.assertIsNotNone(info)
-            self.assertEqual(info.version, "1.0.0-rc.1")
-            self.assertEqual(info.channel, "release-candidate")
+            self.assertEqual(info.version, "2.0.0-rc.1")
+            self.assertEqual(info.channel, "beta")
 
     def test_corrupted_manifest_returns_none(self):
         import os as _os

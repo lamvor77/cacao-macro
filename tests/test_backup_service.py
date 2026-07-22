@@ -37,7 +37,7 @@ class _TempProject:
     def __exit__(self, *exc):
         self._tmp.cleanup()
 
-    def make_service(self, app_version="1.0.0-rc.1") -> BackupService:
+    def make_service(self, app_version="1.2.1") -> BackupService:
         return BackupService(storage_dir_fn=lambda: self.storage_dir, app_version=app_version)
 
 

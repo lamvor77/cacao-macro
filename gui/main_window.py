@@ -79,6 +79,15 @@ MESSAGE_SOURCE_MANUAL_FILE = "manual_file"
 MESSAGE_SOURCE_DEFAULT = "default"
 
 
+def build_window_title(is_test_environment: bool) -> str:
+    """메인 윈도우 창 제목을 만든다 — 버전은 항상 표시하고, TEST ENVIRONMENT
+    표시는 .env의 APP_ENV/SUPABASE_ENVIRONMENT가 "test"일 때만 덧붙인다
+    (config/settings.py::IS_TEST_ENVIRONMENT). MainWindow를 인스턴스화하지
+    않고도 두 환경의 제목 문자열을 그대로 단위 테스트할 수 있도록 분리했다."""
+    suffix = " — TEST ENVIRONMENT" if is_test_environment else ""
+    return f"{WINDOW_TITLE} — v{APP_VERSION}{suffix}"
+
+
 def _snapshot_from_record(record: SharedMessageRecord) -> RemoteMessageSnapshot:
     """SharedMessageRecord -> RemoteMessageSnapshot 변환(core.shared_message_coordinator는
     services.shared_message_service를 import하지 않으므로 이 경계에서 변환한다)."""
@@ -189,8 +198,7 @@ class MainWindow(ctk.CTk):
     # ===== 초기 설정 =====
 
     def _setup_window(self) -> None:
-        title_suffix = " — TEST ENVIRONMENT" if IS_TEST_ENVIRONMENT else ""
-        self.title(f"{WINDOW_TITLE} — v{APP_VERSION}{title_suffix}")
+        self.title(build_window_title(IS_TEST_ENVIRONMENT))
         self.geometry(f"{WINDOW_DEFAULT_WIDTH}x{WINDOW_DEFAULT_HEIGHT}")
         self.minsize(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT)
         self.protocol("WM_DELETE_WINDOW", self._on_exit)

@@ -150,6 +150,26 @@ class TestTestEnvironmentFlag(unittest.TestCase):
             self.assertIn("환경: TEST ENVIRONMENT", text)
 
 
+class TestAppVersionInDiagnostics(unittest.TestCase):
+    """배포 전 버전 표시 정리 — 진단정보의 버전이 config/version.py의
+    APP_VERSION을 그대로 반영하는지(별도 하드코딩 없음) 확인한다.
+
+    AppDiagnostics.version의 기본값은 모듈 임포트 시점에 한 번 바인딩되므로
+    (dataclass 필드 기본값), 여기서는 "지금 이 프로세스에서 import된
+    APP_VERSION과 정확히 같은 값을 쓰는지"를 직접 확인한다 — 값을 임의로
+    다른 문자열로 바꿔 검증하는 방식(패치)은 dataclass 기본값 바인딩 시점
+    특성상 효과가 없다."""
+
+    def test_snapshot_version_matches_config_version_app_version(self):
+        from config.version import APP_VERSION as CONFIG_APP_VERSION
+
+        svc = _make_service()
+        snapshot = svc.collect()
+        self.assertEqual(snapshot.app.version, CONFIG_APP_VERSION)
+        text = svc.to_copy_text(snapshot)
+        self.assertIn(f"버전: {CONFIG_APP_VERSION}", text)
+
+
 class TestMaskHost(unittest.TestCase):
     def test_masks_long_prefix(self):
         self.assertEqual(mask_host("https://abcdefgh1234.supabase.co"), "abcd********.supabase.co")

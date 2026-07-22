@@ -28,7 +28,7 @@ websockets==15.0.1
 python-dotenv>=1.0.0
 
 # ===== Release Candidate Sprint 1: 버전 비교 =====
-# 프리릴리스 버전 순서(1.0.0-rc.1 < 1.0.0 < 1.0.1)를 올바르게 비교하기 위해
+# 프리릴리스 버전 순서(2.0.0-rc.1 < 2.0.0 < 2.0.1)를 올바르게 비교하기 위해
 # 사용한다(core/version_check.py). 순수 Python 패키지라 PyInstaller가 별도
 # 설정 없이 포함한다.
 packaging>=23.0

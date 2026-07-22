@@ -68,7 +68,7 @@ class TestBackupPanelSmoke(unittest.TestCase):
         records = [
             BackupRecord(
                 filename="backup-manual-1.zip", path="C:/fake/backup-manual-1.zip",
-                created_at="2026-07-18T10:00:00", backup_type="manual", app_version="1.0.0-rc.1",
+                created_at="2026-07-18T10:00:00", backup_type="manual", app_version="1.2.1",
                 size_bytes=1234, file_count=2, validated=True,
             ),
         ]
@@ -105,7 +105,7 @@ class TestBackupPanelSmoke(unittest.TestCase):
         records = [
             BackupRecord(
                 filename="backup-manual-1.zip", path="C:/fake/backup-manual-1.zip",
-                created_at="2026-07-18T10:00:00", backup_type="manual", app_version="1.0.0-rc.1",
+                created_at="2026-07-18T10:00:00", backup_type="manual", app_version="1.2.1",
                 size_bytes=1234, file_count=2, validated=True,
             ),
         ]
@@ -143,7 +143,7 @@ class TestBackupPanelSmoke(unittest.TestCase):
         records = [
             BackupRecord(
                 filename="backup-manual-1.zip", path="C:/fake/backup-manual-1.zip",
-                created_at="2026-07-18T10:00:00", backup_type="manual", app_version="1.0.0-rc.1",
+                created_at="2026-07-18T10:00:00", backup_type="manual", app_version="1.2.1",
                 size_bytes=1234, file_count=2, validated=True,
             ),
         ]
@@ -187,7 +187,7 @@ class TestDiagnosticsPanelSmoke(unittest.TestCase):
         fake_diag_service = MagicMock()
         from services.diagnostics_service import DiagnosticsSnapshot
         fake_diag_service.collect.return_value = DiagnosticsSnapshot(collected_at="2026-07-18T10:00:00")
-        fake_diag_service.to_copy_text.return_value = "[애플리케이션]\n버전: 1.0.0-rc.1"
+        fake_diag_service.to_copy_text.return_value = "[애플리케이션]\n버전: 1.2.1"
 
         root = ctk.CTk()
         root.withdraw()
