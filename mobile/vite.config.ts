@@ -13,8 +13,8 @@ export default defineConfig({
       registerType: "autoUpdate",
       includeAssets: ["favicon.svg", "favicon.png", "apple-touch-icon.png"],
       manifest: {
-        name: "단톡방 매크로",
-        short_name: "단톡방",
+        name: "단톡방매크로",
+        short_name: "단톡방매크로",
         description: "1~12번 발송 메시지를 모바일에서 확인/수정합니다(내부 직원 전용).",
         theme_color: "#1a1a2e",
         background_color: "#1a1a2e",
