@@ -11,7 +11,7 @@ import unittest
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-_STALE_STRINGS = ("1.0.0-rc.1", "release-candidate", "1.2.0")
+_STALE_STRINGS = ("1.0.0-rc.1", "release-candidate", "1.2.0", "1.2.1", "1.2.2")
 
 _EXCLUDED_DIR_NAMES = {
     ".git", "node_modules", "__pycache__", "dist", "build",

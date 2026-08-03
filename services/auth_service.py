@@ -26,10 +26,13 @@
 # login_with_google()은 브라우저 응답을 기다리는 동안 블로킹된다 — 호출부가
 # 반드시 별도 스레드에서 실행해야 한다(메인 UI 스레드를 막지 않기 위해).
 
+import hashlib
+import inspect
 import json
 import logging
 import os
 import sys
+import threading
 import webbrowser
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -51,6 +54,13 @@ except ImportError:
 
 _DPAPI_DESCRIPTION = "cacao_macro Supabase session"
 _APP_USERS_TABLE = "app_users"
+
+# 세션 파일 포맷 버전. AuthSession의 필드 구성이나 저장 방식이 바뀌면 이 값을
+# 올린다. 저장된 파일의 버전이 이 값과 다르면(버전 표시가 아예 없는 구버전
+# 파일 포함) 무조건 폐기하고 재로그인을 요구한다 — 이전 버전에서 만들어진
+# 세션 파일을 새 버전 코드가 그대로 파싱해서 쓰다가 필드 누락/의미 변경으로
+# 오동작하는 것을 원천 차단하기 위함이다.
+_SESSION_SCHEMA_VERSION = 1
 
 
 @dataclass
@@ -141,6 +151,44 @@ def _session_dir() -> str:
     return path
 
 
+def _token_fingerprint(token: str) -> str:
+    """토큰 원문을 로그에 남기지 않기 위한, 되돌릴 수 없는 짧은 지문(앞 8자).
+
+    SHA-256 해시의 앞 8자만 쓴다 — 로그에서 "같은 토큰인지" 정도만 구분할
+    수 있으면 충분하고, 원문을 복원할 방법은 없어야 한다(요구사항 6절)."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:8]
+
+
+def _external_caller_id() -> str:
+    """이 모듈(auth_service.py) 밖에서 세션 갱신을 유발한 첫 호출부를
+    "파일명:함수명" 형태로 반환한다.
+
+    자동 새로고침 타이머/수동 새로고침 버튼/Realtime 재연결/앱 시작 시
+    세션 복원 등 여러 경로가 모두 refresh_session()으로 모이기 때문에,
+    호출부마다 로그 인자를 추가하는 대신 스택을 직접 훑어 호출 경로를
+    식별한다(요구사항 6절 "호출 스택/호출 경로 식별자")."""
+    this_file = os.path.abspath(__file__)
+    for frame_info in inspect.stack():
+        if os.path.abspath(frame_info.filename) != this_file:
+            return f"{os.path.basename(frame_info.filename)}:{frame_info.function}"
+    return "unknown"
+
+
+def _is_invalid_refresh_token_error(exc: Exception) -> bool:
+    """"Invalid Refresh Token: Already Used"류(회전된 토큰 재사용) 오류인지
+    판별한다.
+
+    설치된 supabase_auth 라이브러리의 AuthApiError에는 이 케이스 전용
+    타입(.code) 값이 없다(소스 직접 확인 — ErrorCode Literal 82종 중
+    refresh_token 관련 전용 코드 없음) — 그래서 메시지 텍스트로 판별한다.
+    이 판정이 True면 같은 refresh_token으로는 다시 시도하지 않는다
+    (요구사항 7절)."""
+    message = str(exc).lower()
+    if "refresh token" not in message and "refresh_token" not in message:
+        return False
+    return "already used" in message or "invalid" in message or "not found" in message
+
+
 def _parse_port_list(raw: str) -> list[int]:
     ports: list[int] = []
     for part in raw.split(","):
@@ -176,6 +224,21 @@ class AuthService:
         # 전혀 반영되지 않아 messages 쓰기가 전부 RLS(42501)로 거부된다(버그 수정 이력).
         self._client_mgr = client_manager or SupabaseClientManager(self._config)
         self._session_path = os.path.join(_session_dir(), "session.dat")
+        # refresh_session()을 동시에 여러 스레드가 호출해도(자동 새로고침
+        # 타이머, 수동 새로고침, Realtime 재연결 등) 실제 네트워크 갱신
+        # 요청은 최대 1건만 나가도록 직렬화한다(요구사항 2절) — Supabase의
+        # refresh_token은 1회용(rotate)이라 동시에 같은 토큰으로 두 요청을
+        # 보내면 하나는 반드시 "Invalid Refresh Token: Already Used"로
+        # 실패한다.
+        self._refresh_lock = threading.Lock()
+        # 가장 최근에 저장에 성공한 세션의 메모리 캐시 — Realtime
+        # 재연결처럼 네트워크 호출이 금지된 호출부(get_cached_session_tokens
+        # 참고)가 디스크 재조회 없이 최신 값을 즉시 읽을 수 있게 한다.
+        self._session_cache: Optional[AuthSession] = None
+        # 이미 "Already Used"로 실패한 것으로 확인된 refresh_token — 같은
+        # 프로세스에서 같은 토큰으로 다시 네트워크 요청을 보내지 않기 위한
+        # 표시(요구사항 7절 "동일 토큰으로 재시도하지 않음").
+        self._last_failed_refresh_token: Optional[str] = None
 
     @property
     def client_manager(self) -> SupabaseClientManager:
@@ -211,31 +274,122 @@ class AuthService:
     def is_logged_in(self) -> bool:
         return self.get_session() is not None
 
+    def get_cached_session_tokens(self) -> tuple:
+        """네트워크 호출 없이 (access_token, refresh_token)을 반환한다.
+
+        메모리 캐시(이 프로세스에서 가장 최근에 저장에 성공한 세션)가 있으면
+        그것을, 없으면 디스크에 저장된 세션을 그대로 읽어 반환한다 — 만료
+        여부 확인이나 갱신 시도는 하지 않는다(load_session()과 동일한 계약).
+        RealtimeMessageSyncService의 get_session_tokens_fn처럼 블로킹
+        네트워크 호출이 금지된 호출부 전용이다 — 메모리 캐시를 먼저 보는
+        만큼, 갱신 직후에는 디스크를 다시 읽는 것보다 더 최신 값을 즉시
+        돌려줄 수 있다."""
+        session = self._session_cache or self._load_session()
+        if session is None:
+            return (None, None)
+        return (session.access_token, session.refresh_token)
+
     # ===== 세션 갱신/적용 =====
 
     def refresh_session(self) -> AuthResult:
-        """저장된 refresh_token으로 세션 갱신을 시도한다."""
-        stored = self._load_session()
-        if stored is None or not stored.refresh_token:
-            return AuthResult(False, error="저장된 세션이 없습니다 — 로그인이 필요합니다.")
+        """저장된 refresh_token으로 세션 갱신을 시도한다.
 
-        client_result = self._client_mgr.get_client()
-        if not client_result.success:
-            return AuthResult(False, error=client_result.error)
-
+        자동 새로고침 타이머, API 호출 전후, Realtime 재연결, 수동 새로고침
+        버튼 등 여러 스레드가 동시에 이 메서드를 호출할 수 있다 — 이 모든
+        경로를 self._refresh_lock 하나로 직렬화한다(요구사항 2절). 락을
+        기다리던 호출은 락을 얻은 뒤 디스크에서 세션을 다시 읽어, 그 사이
+        먼저 락을 잡았던 다른 호출이 이미 갱신을 끝냈으면 새 네트워크
+        요청 없이 그 결과를 그대로 재사용한다 — Supabase의 refresh_token은
+        1회용(rotate)이라, 같은 토큰으로 두 번째 네트워크 요청을 보내면
+        "Invalid Refresh Token: Already Used"로 반드시 실패하기 때문이다.
+        """
+        caller = _external_caller_id()
+        acquired_immediately = self._refresh_lock.acquire(blocking=False)
+        if not acquired_immediately:
+            self._refresh_lock.acquire()
+        waited = not acquired_immediately
         try:
-            auth_response = client_result.client.auth.refresh_session(stored.refresh_token)
-        except Exception as e:
-            logger.warning(f"Supabase 세션 갱신 실패: {e}")
-            return AuthResult(False, error=str(e))
+            # 락 대기 중 다른 스레드가 이미 갱신을 끝냈을 수 있으므로, 락을
+            # 잡은 뒤 디스크에서 세션을 다시 읽는다(락 획득 전에 읽은 값은
+            # 쓰지 않는다).
+            stored = self._load_session()
+            if stored is None or not stored.refresh_token:
+                return AuthResult(False, error="저장된 세션이 없습니다 — 로그인이 필요합니다.")
 
-        if auth_response.session is None:
-            return AuthResult(False, error="세션 갱신 응답에 세션이 없습니다.")
+            if not stored.is_expired():
+                logger.info(
+                    f"세션 갱신 요청={caller}, 락대기={waited}, 결과=스킵(다른 요청이 이미 갱신 완료)"
+                )
+                return AuthResult(True, session=stored)
 
-        new_session = _session_from_supabase_auth_response(auth_response)
-        self._save_session(new_session)
-        logger.info("Supabase 세션 갱신 성공")
-        return AuthResult(True, session=new_session)
+            token_fp = _token_fingerprint(stored.refresh_token)
+
+            if stored.refresh_token == self._last_failed_refresh_token:
+                logger.warning(
+                    f"세션 갱신 요청={caller}, 락대기={waited}, token_fp={token_fp}, "
+                    f"결과=거부(이미 무효로 확인된 refresh_token 재사용 방지)"
+                )
+                return AuthResult(False, error="INVALID_REFRESH_TOKEN: 재로그인이 필요합니다.")
+
+            client_result = self._client_mgr.get_client()
+            if not client_result.success:
+                logger.warning(
+                    f"세션 갱신 요청={caller}, 락대기={waited}, token_fp={token_fp}, "
+                    f"결과=실패(클라이언트 획득 오류)"
+                )
+                return AuthResult(False, error=client_result.error)
+
+            try:
+                auth_response = client_result.client.auth.refresh_session(stored.refresh_token)
+            except Exception as e:
+                if _is_invalid_refresh_token_error(e):
+                    self._last_failed_refresh_token = stored.refresh_token
+                    self._invalidate_local_session()
+                    logger.warning(
+                        f"세션 갱신 요청={caller}, 락대기={waited}, token_fp={token_fp}, "
+                        f"결과=실패(회전된 refresh_token 재사용 감지) — 재로그인이 필요합니다."
+                    )
+                    return AuthResult(False, error="INVALID_REFRESH_TOKEN: 재로그인이 필요합니다.")
+                logger.warning(
+                    f"세션 갱신 요청={caller}, 락대기={waited}, token_fp={token_fp}, "
+                    f"결과=실패({type(e).__name__})"
+                )
+                return AuthResult(False, error=str(e))
+
+            if auth_response.session is None:
+                logger.warning(
+                    f"세션 갱신 요청={caller}, 락대기={waited}, token_fp={token_fp}, "
+                    f"결과=실패(응답에 세션 없음)"
+                )
+                return AuthResult(False, error="세션 갱신 응답에 세션이 없습니다.")
+
+            new_session = _session_from_supabase_auth_response(auth_response)
+            self._last_failed_refresh_token = None
+            save_ok = self._save_session(new_session)
+            logger.info(
+                f"세션 갱신 요청={caller}, 락대기={waited}, token_fp={token_fp}, 결과=성공, "
+                f"저장={'성공' if save_ok else '실패'}, 경로={self._session_path}, "
+                f"expires_at={new_session.expires_at}"
+            )
+            return AuthResult(True, session=new_session)
+        finally:
+            self._refresh_lock.release()
+
+    def _invalidate_local_session(self) -> None:
+        """복구 불가능한 것으로 확인된 세션(예: 이미 사용된 refresh_token)을
+        로컬에서 완전히 제거한다.
+
+        메모리 캐시와 디스크 파일을 모두 지워, 이후 어떤 호출부도(이번 실행
+        중이든 다음 실행이든) 같은 죽은 토큰으로 다시 시도하지 않고 곧바로
+        "로그인 필요" 상태로 취급하게 한다(요구사항 7절 "세션을 명확히
+        무효화")."""
+        self._session_cache = None
+        try:
+            if os.path.exists(self._session_path):
+                os.remove(self._session_path)
+                logger.info("복구 불가능한 세션을 감지해 로컬 세션 파일을 삭제했습니다 — 재로그인이 필요합니다.")
+        except OSError as e:
+            logger.warning(f"무효화된 세션 파일 삭제 오류: {e}")
 
     def apply_session_to_client(self, session: Optional[AuthSession] = None) -> AuthResult:
         """저장된(또는 주어진) 세션을 Supabase client의 인증 상태에 반영한다.
@@ -438,6 +592,8 @@ class AuthService:
                 # 그 외(네트워크 등) 예외까지 로그아웃 실패로 이어지지 않도록 방어한다.
                 logger.debug(f"서버 측 로그아웃 요청 중 오류(무시): {e}")
 
+        self._session_cache = None
+        self._last_failed_refresh_token = None
         try:
             if os.path.exists(self._session_path):
                 os.remove(self._session_path)
@@ -460,6 +616,16 @@ class AuthService:
                 encrypted = f.read()
             _, decrypted = win32crypt.CryptUnprotectData(encrypted, None, None, None, 0)
             raw = json.loads(decrypted.decode("utf-8"))
+
+            file_version = raw.pop("session_version", None)
+            if file_version != _SESSION_SCHEMA_VERSION:
+                logger.warning(
+                    f"세션 파일 버전이 호환되지 않아(파일={file_version!r}, "
+                    f"현재={_SESSION_SCHEMA_VERSION}) 폐기합니다 — 재로그인이 필요합니다."
+                )
+                self._invalidate_local_session()
+                return None
+
             return AuthSession(**raw)
         except Exception as e:
             # DPAPI는 다른 사용자 계정/다른 PC에서 복호화를 시도하면 반드시 실패한다
@@ -467,21 +633,44 @@ class AuthService:
             logger.warning(f"세션 파일을 읽을 수 없어 로그인 필요 상태로 처리합니다: {e}")
             return None
 
-    def _save_session(self, session: AuthSession) -> None:
+    def _save_session(self, session: AuthSession) -> bool:
+        """세션을 DPAPI로 암호화해 저장한다.
+
+        임시 파일에 쓰고 flush()+fsync()로 디스크에 실제로 반영한 뒤
+        os.replace()로 원자적으로 교체한다(요구사항 4절) — 쓰는 도중
+        프로세스가 죽거나 다른 쓰기와 겹쳐도, 최종 경로(session.dat)에는
+        "이전 파일 그대로" 또는 "새 파일로 완전히 교체됨" 둘 중 하나만
+        있고, 일부만 쓰인 손상된 파일이 최종 경로에 남는 경우는 없다.
+
+        성공 시 메모리 캐시도 함께 갱신한다(get_cached_session_tokens 참고).
+        """
         if not _DPAPI_AVAILABLE:
             logger.error("win32crypt(pywin32)를 사용할 수 없어 세션을 저장할 수 없습니다.")
-            return
+            return False
 
+        tmp_path = self._session_path + ".tmp"
         try:
-            raw = json.dumps(asdict(session)).encode("utf-8")
+            payload = asdict(session)
+            payload["session_version"] = _SESSION_SCHEMA_VERSION
+            raw = json.dumps(payload).encode("utf-8")
             encrypted = win32crypt.CryptProtectData(raw, _DPAPI_DESCRIPTION, None, None, None, 0)
-            tmp_path = self._session_path + ".tmp"
             with open(tmp_path, "wb") as f:
                 f.write(encrypted)
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp_path, self._session_path)
-            logger.info("Supabase 세션을 DPAPI로 암호화해 저장했습니다.")
         except OSError as e:
             logger.error(f"세션 저장 오류: {e}")
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+            return False
+
+        self._session_cache = session
+        logger.info("Supabase 세션을 DPAPI로 암호화해 저장했습니다.")
+        return True
 
 
 def _session_from_supabase_auth_response(auth_response) -> AuthSession:

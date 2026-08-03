@@ -2,7 +2,8 @@
 #
 # MainWindow(Tk 위젯)를 인스턴스화하지 않는 기존 프로젝트 관례를 따른다 —
 # 창 제목 문자열은 순수 함수로 분리되어 있어 렌더링 없이 테스트할 수 있다.
-# 버전 표시를 v1.2.1로 통일하는 작업(v1.2.1 패치 릴리스)의 회귀 테스트.
+# 버전 표시가 config/version.py의 APP_VERSION을 그대로 따라가는지 확인하는
+# 회귀 테스트(버전이 바뀔 때마다 아래 두 리터럴만 최신 버전으로 갱신하면 됨).
 
 import unittest
 from unittest.mock import patch
@@ -12,17 +13,17 @@ import gui.main_window as mw
 
 class TestBuildWindowTitle(unittest.TestCase):
     def test_production_environment_shows_version_only(self):
-        with patch.object(mw, "APP_VERSION", "1.2.1"):
+        with patch.object(mw, "APP_VERSION", "1.2.3"):
             self.assertEqual(
                 mw.build_window_title(False),
-                "카카오톡 자동 메시지 전송 — v1.2.1",
+                "카카오톡 자동 메시지 전송 — v1.2.3",
             )
 
     def test_test_environment_appends_suffix(self):
-        with patch.object(mw, "APP_VERSION", "1.2.1"):
+        with patch.object(mw, "APP_VERSION", "1.2.3"):
             self.assertEqual(
                 mw.build_window_title(True),
-                "카카오톡 자동 메시지 전송 — v1.2.1 — TEST ENVIRONMENT",
+                "카카오톡 자동 메시지 전송 — v1.2.3 — TEST ENVIRONMENT",
             )
 
     def test_title_tracks_whatever_app_version_currently_is(self):

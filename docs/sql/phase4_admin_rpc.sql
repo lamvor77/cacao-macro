@@ -9,6 +9,11 @@
 --
 -- 이 저장소가 아니라 향후 cacao-message-admin 저장소로 이관될 예정이라는
 -- phase2b_schema.sql의 전제를 그대로 따른다 — 지금은 검토용 초안으로 여기 둔다.
+--
+-- 2026-07 운영 전환 후 확인된 사실: 운영 프로젝트(kdyxxkltafeuucijiyzp)에서
+-- admin_list_users 호출 시 PGRST202(함수를 찾을 수 없음) 오류가 발생했다 —
+-- 이 파일이 그 프로젝트에 적용된 적이 없었을 가능성이 높다. 재적용 시
+-- 12절의 NOTIFY까지 포함해 파일 전체를 한 번에 실행할 것.
 
 -- ============================================================
 -- 0. app_users 확장 — updated_by 컬럼 추가
@@ -652,3 +657,15 @@ drop policy if exists app_users_update_admin_only on public.app_users;
 -- update public.app_users
 --    set role = 'admin', status = 'approved', approved_at = now()
 --  where email = '실제관리자@example.com';
+
+-- ============================================================
+-- 12. PostgREST 스키마 캐시 즉시 갱신
+-- ============================================================
+-- PostgREST는 함수/테이블 시그니처를 자체 캐시에 보관하고 주기적으로만
+-- 갱신한다 — 이 파일을 실행해 admin_* 함수를 새로 만들거나 시그니처를
+-- 바꿔도, 캐시가 갱신되기 전까지는 클라이언트가 "PGRST202: Could not
+-- find the function ..." 오류를 받을 수 있다(실제로 발생한 사례:
+-- 2026-07 운영 전환 직후 admin_list_users 호출 시). 아래 NOTIFY로 즉시
+-- 캐시를 갱신해 이 파일 실행 직후부터 바로 호출 가능하게 한다 — 데이터를
+-- 변경하지 않는 안전한 명령이며, 여러 번 실행해도 문제없다.
+NOTIFY pgrst, 'reload schema';

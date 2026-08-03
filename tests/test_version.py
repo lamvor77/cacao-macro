@@ -54,7 +54,7 @@ class TestVersionResolution(unittest.TestCase):
     def test_frozen_mode_without_env_uses_safe_fallback(self):
         with patch.object(sys, "frozen", True, create=True):
             mod = _reload_version_module()
-            self.assertEqual(mod.APP_VERSION, "1.2.1")
+            self.assertEqual(mod.APP_VERSION, "1.2.3")
             self.assertEqual(mod.BUILD_CHANNEL, "stable")
 
     def test_env_var_overrides_even_in_dev_mode(self):

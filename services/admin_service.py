@@ -87,14 +87,33 @@ def _translate_rpc_error(exc: Exception) -> AdminServiceError:
     ERRCODE(SQLSTATE)가 아니라 메시지 앞부분의 코드 문자열로 구분하는 이유는
     RAISE EXCEPTION의 메시지 규약 설계(15절)와 동일 — SQL 쪽에서 별도
     USING ERRCODE 등록 없이도 안정적으로 매핑할 수 있다.
+
+    postgrest.exceptions.APIError는 PostgREST 오류 응답의 code/message/details/hint를
+    각각 속성으로 담고 있다(라이브러리 소스 확인). 우리 SQL이 던지는 'CODE: 메시지'
+    형태가 아닌 오류(권한 부족, 함수/테이블 없음, 타임아웃 등 예상 밖의 Postgres
+    오류)는 지금까지 type(exc).__name__("APIError")만 로그에 남아 원인을 전혀 알 수
+    없었다 — 이런 경우일수록 code/details/hint에 실제 원인이 들어있으므로 전부
+    로그에 남긴다.
     """
     message = getattr(exc, "message", None) or str(exc)
-    for code, exc_cls in _ERROR_CODE_MAP.items():
-        prefix = f"{code}:"
+    code = getattr(exc, "code", None)
+    details = getattr(exc, "details", None)
+    hint = getattr(exc, "hint", None)
+
+    for known_code, exc_cls in _ERROR_CODE_MAP.items():
+        prefix = f"{known_code}:"
         if message.startswith(prefix):
             detail = message[len(prefix):].strip()
+            logger.debug(
+                "AdminService: RPC 오류 — code=%s, message=%s, details=%s, hint=%s",
+                code, message, details, hint,
+            )
             return exc_cls(detail or message)
-    logger.error(f"AdminService: 알 수 없는 RPC 오류 유형 ({type(exc).__name__})")
+
+    logger.error(
+        "AdminService: 알 수 없는 RPC 오류 유형 (%s) — code=%s, message=%s, details=%s, hint=%s",
+        type(exc).__name__, code, message, details, hint,
+    )
     return AdminServiceError("관리자 작업 중 알 수 없는 오류가 발생했습니다.")
 
 

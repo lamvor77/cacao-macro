@@ -69,8 +69,8 @@ def _make_service():
     return AdminService(client_manager=mgr), client, mgr
 
 
-def _api_error(message: str) -> PostgrestAPIError:
-    return PostgrestAPIError({"message": message, "code": "P0001"})
+def _api_error(message: str, code: str = "P0001", details: str = None, hint: str = None) -> PostgrestAPIError:
+    return PostgrestAPIError({"message": message, "code": code, "details": details, "hint": hint})
 
 
 _UUID_A = "11111111-1111-1111-1111-111111111111"
@@ -228,6 +228,24 @@ class TestErrorMapping(unittest.TestCase):
         self.assertNotIsInstance(exc, AdminPermissionError)
         self.assertNotIsInstance(exc, AdminValidationError)
         self.assertNotIsInstance(exc, AdminConflictError)
+
+    def test_17b_unknown_rpc_error_logs_code_message_details_hint(self):
+        """알 수 없는(=CODE: 접두어와 매칭 안 되는) APIError는 code/message/details/hint를
+        전부 로그에 남겨야 한다 — 지금까지는 예외 타입 이름만 남아 원인을 알 수 없었다."""
+        err = _api_error(
+            "permission denied for table app_users",
+            code="42501",
+            details="일부 컬럼에 대한 권한이 없습니다.",
+            hint="GRANT 문으로 권한을 부여하세요.",
+        )
+        with self.assertLogs("services.admin_service", level="ERROR") as cm:
+            _translate_rpc_error(err)
+
+        joined_logs = "\n".join(cm.output)
+        self.assertIn("42501", joined_logs)
+        self.assertIn("permission denied for table app_users", joined_logs)
+        self.assertIn("일부 컬럼에 대한 권한이 없습니다.", joined_logs)
+        self.assertIn("GRANT 문으로 권한을 부여하세요.", joined_logs)
 
     def test_end_to_end_error_raised_through_service_call(self):
         """_translate_rpc_error()뿐 아니라 실제 서비스 메서드 호출 경로에서도 매핑이 적용되는지."""

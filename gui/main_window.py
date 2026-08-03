@@ -594,12 +594,11 @@ class MainWindow(ctk.CTk):
             self.after(0, self._start_shared_message_sync)
 
     def _get_realtime_session_tokens(self) -> tuple:
-        """로컬 저장된 세션 파일만 읽는다(네트워크 없음) — realtime_message_sync_service의
-        get_session_tokens_fn 계약과 동일."""
-        session = self._auth.load_session()
-        if session is None:
-            return (None, None)
-        return (session.access_token, session.refresh_token)
+        """네트워크 호출 없이 토큰을 반환한다 — realtime_message_sync_service의
+        get_session_tokens_fn 계약과 동일. AuthService의 메모리 캐시(가장 최근
+        갱신 결과)를 우선 사용해, 세션 파일을 다시 읽는 것보다 최신 토큰을
+        Realtime 클라이언트에 넘길 가능성을 높인다(세션 갱신 경쟁 조사 결과)."""
+        return self._auth.get_cached_session_tokens()
 
     # --- ControlPanel 포커스 연동 ---
 
