@@ -54,7 +54,7 @@ class TestVersionResolution(unittest.TestCase):
     def test_frozen_mode_without_env_uses_safe_fallback(self):
         with patch.object(sys, "frozen", True, create=True):
             mod = _reload_version_module()
-            self.assertEqual(mod.APP_VERSION, "1.2.3")
+            self.assertEqual(mod.APP_VERSION, "1.2.4")
             self.assertEqual(mod.BUILD_CHANNEL, "stable")
 
     def test_env_var_overrides_even_in_dev_mode(self):
@@ -87,10 +87,10 @@ class TestVersionResolution(unittest.TestCase):
         self.assertEqual(mod.git_commit_short(), "0123456")
 
     def test_version_summary_format(self):
-        os.environ["CACAO_MACRO_VERSION"] = "1.2.3"
+        os.environ["CACAO_MACRO_VERSION"] = "1.2.4"
         os.environ["CACAO_MACRO_BUILD_CHANNEL"] = "stable"
         mod = _reload_version_module()
-        self.assertEqual(mod.version_summary(), "1.2.3 (stable)")
+        self.assertEqual(mod.version_summary(), "1.2.4 (stable)")
 
     def test_release_target_version_ignores_env_and_dev_fallback(self):
         # 개발 모드 + 환경변수가 설정되어 있어도(APP_VERSION이 "development"나

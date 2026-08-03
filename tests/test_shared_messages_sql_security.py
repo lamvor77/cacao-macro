@@ -164,6 +164,15 @@ class TestSharedMessagesSqlSecurity(unittest.TestCase):
     def test_replica_identity_full_for_realtime_payload_completeness(self):
         self.assertIn("alter table public.shared_messages replica identity full", self.sql_lower)
 
+    def test_notify_pgrst_reload_schema_present(self):
+        """PostgREST 스키마 캐시 즉시 갱신 — docs/sql/phase4_admin_rpc.sql에서
+        이 문장이 빠져 PGRST202가 발생했던 사례(admin_list_users)의 재발 방지로
+        추가됨. update_shared_message/force_update_shared_message RPC가 새로
+        만들어지거나 시그니처가 바뀐 직후에도 곧바로 호출 가능해야 한다."""
+        self.assertIn("NOTIFY pgrst, 'reload schema';", self.sql)
+        idx = self.sql.rfind("NOTIFY pgrst, 'reload schema';")
+        self.assertGreater(idx, len(self.sql) * 0.9, "NOTIFY 문장이 파일 끝부분에 있어야 함")
+
 
 if __name__ == "__main__":
     unittest.main()

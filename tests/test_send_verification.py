@@ -148,6 +148,37 @@ class TestBlockPolicy(unittest.TestCase):
         self.assertEqual(result.error_code, VerificationErrorCode.TIMEOUT)
 
 
+class TestAuthErrorClassification(unittest.TestCase):
+    """SharedMessageAuthError(세션이 아직 반영 안 됐거나 만료된 경우)는
+    NETWORK_ERROR가 아니라 AUTH_ERROR로 분류돼야 하고, BLOCK 정책에서는
+    기존과 동일하게 발송이 차단돼야 한다(요구사항 6절)."""
+
+    def test_shared_message_auth_error_classified_as_auth_error_and_blocks(self):
+        from services.shared_message_service import SharedMessageAuthError
+
+        fetch = _FailingFetch(SharedMessageAuthError("로그인이 필요합니다 — 다시 로그인해 주세요."))
+        result = verify_message_before_send(
+            message_no=1, local_content="cache", local_revision=1,
+            fetch_fn=fetch, policy=OfflineSendPolicy.BLOCK, timeout_seconds=5,
+            retry_count=0, service_enabled=True,
+        )
+        self.assertFalse(result.allowed)
+        self.assertEqual(result.error_code, VerificationErrorCode.AUTH_ERROR)
+
+    def test_shared_message_permission_error_still_classified_as_auth_error(self):
+        """서버가 명시적으로 PERMISSION_DENIED를 던진 기존 경로도 계속 AUTH_ERROR."""
+        from services.shared_message_service import SharedMessagePermissionError
+
+        fetch = _FailingFetch(SharedMessagePermissionError("메시지를 수정할 권한이 없습니다."))
+        result = verify_message_before_send(
+            message_no=1, local_content="cache", local_revision=1,
+            fetch_fn=fetch, policy=OfflineSendPolicy.BLOCK, timeout_seconds=5,
+            retry_count=0, service_enabled=True,
+        )
+        self.assertFalse(result.allowed)
+        self.assertEqual(result.error_code, VerificationErrorCode.AUTH_ERROR)
+
+
 class TestCachedPolicy(unittest.TestCase):
     def test_network_error_uses_cached_content(self):
         fetch = _FailingFetch(ConnectionError("net down"))

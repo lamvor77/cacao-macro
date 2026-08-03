@@ -158,9 +158,19 @@ class MainWindow(ctk.CTk):
         # 같은 client_manager를 공유한다(AdminService와 동일한 이유 — 로그인 세션이
         # RPC의 auth.uid()에 반영되어야 한다). 레거시 CloudSyncCoordinator/messages
         # 테이블과는 완전히 별개로 동작한다(요구사항 12 — 기존 기능 유지).
-        self._shared_msg_service = SharedMessageService(client_manager=self._auth.client_manager)
+        self._shared_msg_service = SharedMessageService(
+            client_manager=self._auth.client_manager, user_id_fn=self._shared_message_user_id,
+            ensure_logged_in_fn=self._auth.is_logged_in,
+        )
         self._shared_coordinator = SharedMessageCoordinator()
         self._realtime_sync: Optional[RealtimeMessageSyncService] = None
+        # 앱 시작 시 _check_and_apply_auth_ui()가 최초 1회 완료된 뒤에만
+        # _start_shared_message_sync()를 자동으로 트리거하기 위한 표시(아래
+        # __init__ 끝부분 주석 참고) — 로그인/로그아웃 시점의 후속
+        # _refresh_auth_ui_async() 호출에서는 이미 _restart_shared_message_realtime()이
+        # 별도로 Realtime을 재시작하므로, 여기서 또 시작하면 이전 인스턴스를
+        # stop() 없이 덮어써 스레드가 새는 중복 시작이 된다.
+        self._shared_message_sync_bootstrapped = False
         self._migration_prompted = False
         self._last_shared_sync_at: Optional[datetime] = None
         self._last_shared_sync_text: str = ""
@@ -191,9 +201,17 @@ class MainWindow(ctk.CTk):
         # 이 메서드도 내부적으로 백그라운드 스레드를 띄우고 그 스레드가 self.after()를
         # 호출하므로, mainloop 시작 전에 실행되면 동일한 경쟁 상태가 재현된다.
         self.after(100, self._refresh_auth_ui_async)
-        # Realtime 구독도 자체 백그라운드 스레드(asyncio 이벤트루프)를 띄우므로
-        # 동일한 이유로 mainloop 진입 이후로 미룬다.
-        self.after(150, self._start_shared_message_sync)
+        # Realtime 구독/shared_messages 초기 조회는 _check_and_apply_auth_ui()가
+        # 완료된 뒤에 시작한다(_check_and_apply_auth_ui 안의 self.after(0, ...)
+        # 호출 참고) — 예전에는 여기서 self.after(150, ...)로 독립적인 지연만
+        # 두었는데, apply_session_to_client()(공유 Supabase Client에 실제 로그인
+        # 세션의 Authorization 헤더를 반영하는 유일한 지점)가 아직 끝나지
+        # 않았을 수도 있는 상태에서 shared_messages 첫 조회/RPC가 먼저 나가버려,
+        # anon 권한으로 요청이 나가는 경쟁 상태가 있었다(shared_messages RPC는
+        # anon의 EXECUTE 권한이 명시적으로 회수되어 있어 이 경우 우리 자체
+        # "CODE: 메시지" 규약과 무관한 Postgres 권한 오류가 나고, 그 오류
+        # 메시지가 우리 코드가 아는 코드 접두어와 매칭되지 않아 "SharedMessageService:
+        # 알 수 없는 RPC 오류 유형 (APIError)"로만 남았다).
 
     # ===== 초기 설정 =====
 
@@ -593,6 +611,13 @@ class MainWindow(ctk.CTk):
         if config.enabled and config.realtime_enabled:
             self.after(0, self._start_shared_message_sync)
 
+    def _shared_message_user_id(self) -> Optional[str]:
+        """SharedMessageService의 오류 로그 전용 — 네트워크 호출 없이 현재
+        로그인 사용자 id만 읽는다(_get_realtime_session_tokens와 동일한 이유로
+        load_session()을 쓴다 — 세션 갱신을 유발하면 안 됨)."""
+        session = self._auth.load_session()
+        return session.user_id if session is not None else None
+
     def _get_realtime_session_tokens(self) -> tuple:
         """네트워크 호출 없이 토큰을 반환한다 — realtime_message_sync_service의
         get_session_tokens_fn 계약과 동일. AuthService의 메모리 캐시(가장 최근
@@ -642,7 +667,20 @@ class MainWindow(ctk.CTk):
             except SharedMessageConflictError:
                 logger.warning(f"shared_messages 저장 충돌(message_no={message_no})")
                 self._log_masked_save_result(message_no, success=False, reason="conflict")
-                self.after(0, lambda n=message_no: self._shared_coordinator.mark_conflict(n))
+                # 요구사항 5절 — 뭉뚱그린 오류가 아니라 충돌 전용 처리: 로컬 값으로
+                # 조용히 덮어쓰지 않고, 서버 최신값을 재조회해 기존 REMOTE_UPDATED와
+                # 동일한 "다른 직원이 수정했습니다" 대화상자로 사용자가 직접
+                # 선택하게 한다(최신값 조회 자체가 실패해도 CONFLICT 표시는 유지).
+                latest_snapshot = None
+                try:
+                    latest_record = self._shared_msg_service.get_message(message_no)
+                    if latest_record is not None:
+                        latest_snapshot = _snapshot_from_record(latest_record)
+                except SharedMessageError as fetch_err:
+                    logger.warning(
+                        f"충돌 후 서버 최신값 재조회 실패(message_no={message_no}): {type(fetch_err).__name__}"
+                    )
+                self.after(0, lambda n=message_no, s=latest_snapshot: self._apply_shared_message_conflict(n, s))
             except SharedMessageError as e:
                 logger.warning(f"shared_messages 저장 실패(message_no={message_no}): {type(e).__name__}")
                 self._log_masked_save_result(message_no, success=False, reason=type(e).__name__)
@@ -655,6 +693,20 @@ class MainWindow(ctk.CTk):
         self._shared_coordinator.mark_saved(message_no, _snapshot_from_record(record))
         self._mark_message_source([message_no], MESSAGE_SOURCE_SHARED_SERVER)
         self._refresh_message_status_label(message_no)
+
+    def _apply_shared_message_conflict(
+        self, message_no: int, latest: Optional[RemoteMessageSnapshot],
+    ) -> None:
+        """메인 스레드 전용(요구사항 5절) — CONFLICT 상태로 표시하고, 서버 최신값
+        재조회에 성공했다면 지금 그 필드를 편집 중이 아닐 때만 즉시 "다른 직원이
+        수정했습니다" 대화상자를 띄운다. 아직 편집 중이면 재촉하지 않고
+        pending_remote로 보류해, 기존 로직(_on_message_focus_end)이 포커스가
+        빠질 때 안내하게 한다 — 두 경우 모두 로컬 값을 조용히 덮어쓰지 않는다."""
+        self._shared_coordinator.mark_conflict(message_no, latest=latest)
+        self._refresh_message_status_label(message_no)
+        state = self._shared_coordinator.get_state(message_no)
+        if latest is not None and not state.is_editing:
+            self._show_remote_conflict_dialog(message_no)
 
     def _log_masked_save_result(self, message_no: int, success: bool, reason: str) -> None:
         # 요구사항 16절 — 메시지 본문 전체는 로그에 남기지 않는다(번호/성공여부/오류유형만).
@@ -1099,6 +1151,17 @@ class MainWindow(ctk.CTk):
             # 여기서 함께 조회해도 UI 스레드를 막지 않는다.
             profile = self._auth.get_app_user_profile()
         self.after(0, lambda: self._apply_auth_ui(logged_in, email, profile))
+        # shared_messages Realtime/초기 조회는 반드시 이 시점(=공유 Supabase
+        # Client에 로그인 세션이 실제로 반영된 뒤) 이후, 앱 시작 시 딱 1회만
+        # 자동으로 시작한다 — get_current_user()가 호출한 apply_session_to_client()
+        # 안에서 client.auth.set_session()이 실행되어야 shared_messages RPC/조회가
+        # anon이 아닌 실제 로그인 사용자 권한으로 나간다(위 __init__의
+        # self.after(100, ...) 주석 참고). 로그인/로그아웃 이후의 재호출은
+        # _restart_shared_message_realtime()이 별도로 처리하므로 여기서는
+        # 최초 1회로 제한한다(중복 시작 방지, __init__ 주석 참고).
+        if not self._shared_message_sync_bootstrapped:
+            self._shared_message_sync_bootstrapped = True
+            self.after(0, self._start_shared_message_sync)
 
     def _apply_auth_ui(self, logged_in: bool, email: str, profile: Optional[AppUserProfile] = None) -> None:
         if logged_in:

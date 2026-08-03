@@ -13,17 +13,17 @@ import gui.main_window as mw
 
 class TestBuildWindowTitle(unittest.TestCase):
     def test_production_environment_shows_version_only(self):
-        with patch.object(mw, "APP_VERSION", "1.2.3"):
+        with patch.object(mw, "APP_VERSION", "1.2.4"):
             self.assertEqual(
                 mw.build_window_title(False),
-                "카카오톡 자동 메시지 전송 — v1.2.3",
+                "카카오톡 자동 메시지 전송 — v1.2.4",
             )
 
     def test_test_environment_appends_suffix(self):
-        with patch.object(mw, "APP_VERSION", "1.2.3"):
+        with patch.object(mw, "APP_VERSION", "1.2.4"):
             self.assertEqual(
                 mw.build_window_title(True),
-                "카카오톡 자동 메시지 전송 — v1.2.3 — TEST ENVIRONMENT",
+                "카카오톡 자동 메시지 전송 — v1.2.4 — TEST ENVIRONMENT",
             )
 
     def test_title_tracks_whatever_app_version_currently_is(self):

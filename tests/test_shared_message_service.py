@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from postgrest.exceptions import APIError as PostgrestAPIError
 
 from services.shared_message_service import (
+    SharedMessageAuthError,
     SharedMessageConflictError,
     SharedMessageError,
     SharedMessageNotFoundError,
@@ -114,8 +115,9 @@ class FakeClient:
 
 
 class FakeClientManager:
-    def __init__(self, client: FakeClient):
+    def __init__(self, client: FakeClient, config_url: str = "https://testrefabc.supabase.co"):
         self._client = client
+        self.config = SimpleNamespace(url=config_url)
 
     def get_client(self) -> ClientResult:
         return ClientResult(True, client=self._client)
@@ -126,10 +128,15 @@ class FakeFailingClientManager:
         return ClientResult(False, error="연결 실패", error_code="connection_error")
 
 
-def _make_service():
+def _make_service(user_id_fn=None, config_url="https://testrefabc.supabase.co", ensure_logged_in_fn=None):
     client = FakeClient()
-    mgr = FakeClientManager(client)
-    return SharedMessageService(client_manager=mgr), client
+    mgr = FakeClientManager(client, config_url=config_url)
+    return (
+        SharedMessageService(
+            client_manager=mgr, user_id_fn=user_id_fn, ensure_logged_in_fn=ensure_logged_in_fn,
+        ),
+        client,
+    )
 
 
 # ============================================================
@@ -333,6 +340,268 @@ class TestTranslateRpcError(unittest.TestCase):
     def test_message_without_colon_prefix_returns_generic_error(self):
         exc = _translate_rpc_error(_api_error("이상한 형식의 오류"))
         self.assertIsInstance(exc, SharedMessageError)
+
+
+# ============================================================
+# 7. APIError 상세 로그 — code/message/details/hint + 호출 컨텍스트
+# ============================================================
+# 배경: 지금까지 실패 로그가 "SharedMessageService: 알 수 없는 RPC 오류 유형
+# (APIError)"만 남아 shared_messages 저장/조회 실패 원인을 알 수 없었다.
+# 아래 테스트는 5개 실패 지점(초기 조회/update/force_update/발송 직전 조회와
+# 동일한 get_message/이력 조회) 각각에서 code/message/details/hint와
+# operation/message_no/user_id(앞 8자)/project_ref가 실제로 로그에 남는지,
+# 그리고 토큰·anon key·메시지 본문 전체는 남지 않는지 확인한다.
+
+def _detailed_api_error(message: str) -> PostgrestAPIError:
+    return PostgrestAPIError({
+        "message": message, "code": "42501",
+        "details": "일부 컬럼에 대한 권한이 없습니다.", "hint": "GRANT 문으로 권한을 부여하세요.",
+    })
+
+
+class TestApiErrorDetailedLogging(unittest.TestCase):
+    _USER_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+    def _assert_detail_fields_logged(self, joined_logs: str, operation: str, message_no, rpc=None):
+        self.assertIn("42501", joined_logs)
+        self.assertIn("일부 컬럼에 대한 권한이 없습니다.", joined_logs)
+        self.assertIn("GRANT 문으로 권한을 부여하세요.", joined_logs)
+        self.assertIn(f"operation={operation}", joined_logs)
+        self.assertIn(f"message_no={message_no}", joined_logs)
+        self.assertIn("user=aaaaaaaa", joined_logs)  # UUID 앞 8자만
+        self.assertIn("project=testrefabc", joined_logs)
+        if rpc is not None:
+            self.assertIn(f"rpc={rpc}", joined_logs)
+
+    def test_1_list_messages_logs_full_detail(self):
+        svc, client = _make_service(user_id_fn=lambda: self._USER_ID)
+        client.next_table_error = _detailed_api_error("permission denied for table shared_messages")
+        with self.assertLogs("services.shared_message_service", level="ERROR") as cm:
+            with self.assertRaises(SharedMessageError):
+                svc.list_messages()
+        self._assert_detail_fields_logged("\n".join(cm.output), "list_messages", None)
+
+    def test_2_get_message_logs_full_detail(self):
+        svc, client = _make_service(user_id_fn=lambda: self._USER_ID)
+        client.next_table_error = _detailed_api_error("permission denied for table shared_messages")
+        with self.assertLogs("services.shared_message_service", level="ERROR") as cm:
+            with self.assertRaises(SharedMessageError):
+                svc.get_message(7)
+        self._assert_detail_fields_logged("\n".join(cm.output), "get_message", 7)
+
+    def test_3_list_history_logs_full_detail(self):
+        svc, client = _make_service(user_id_fn=lambda: self._USER_ID)
+        client.next_table_error = _detailed_api_error("permission denied for table shared_message_history")
+        with self.assertLogs("services.shared_message_service", level="ERROR") as cm:
+            with self.assertRaises(SharedMessageError):
+                svc.list_history(message_no=3)
+        self._assert_detail_fields_logged("\n".join(cm.output), "list_history", 3)
+
+    def test_4_update_message_unknown_code_logs_full_detail(self):
+        """update_shared_message — 발송 직전 흐름과 무관하게, "CODE: 메시지" 형식이지만
+        매핑되지 않은 코드도 code/details/hint를 그대로 남겨야 한다."""
+        svc, client = _make_service(user_id_fn=lambda: self._USER_ID)
+        client.next_rpc_error = _detailed_api_error("SOME_UNMAPPED_CODE: 알 수 없는 오류")
+        with self.assertLogs("services.shared_message_service", level="ERROR") as cm:
+            with self.assertRaises(SharedMessageError):
+                svc.update_message(2, None, "x", base_revision=1, update_source="desktop")
+        joined = "\n".join(cm.output)
+        self._assert_detail_fields_logged(joined, "update_message", 2, rpc="update_shared_message")
+        self.assertIn("revision=1", joined)
+
+    def test_5_force_update_message_unknown_code_logs_full_detail(self):
+        svc, client = _make_service(user_id_fn=lambda: self._USER_ID)
+        client.next_rpc_error = _detailed_api_error("SOME_UNMAPPED_CODE: 알 수 없는 오류")
+        with self.assertLogs("services.shared_message_service", level="ERROR") as cm:
+            with self.assertRaises(SharedMessageError):
+                svc.force_update_message(4, None, "x", update_source="admin_force")
+        self._assert_detail_fields_logged(
+            "\n".join(cm.output), "force_update_message", 4, rpc="force_update_shared_message",
+        )
+
+    def test_non_apierror_exception_still_logs_context_without_crashing(self):
+        """네트워크 오류 등 APIError가 아닌 예외는 code/details/hint 없이도
+        operation/message_no/user/project 컨텍스트는 남아야 한다."""
+        svc, client = _make_service(user_id_fn=lambda: self._USER_ID)
+        client.next_table_error = TimeoutError("연결 시간 초과")
+        with self.assertLogs("services.shared_message_service", level="ERROR") as cm:
+            with self.assertRaises(SharedMessageError):
+                svc.get_message(1)
+        joined = "\n".join(cm.output)
+        self.assertIn("operation=get_message", joined)
+        self.assertIn("message_no=1", joined)
+        self.assertIn("user=aaaaaaaa", joined)
+        self.assertIn("project=testrefabc", joined)
+
+    def test_missing_user_id_fn_logs_unknown_without_crashing(self):
+        """user_id_fn을 주지 않아도(레거시 호출부 호환) 오류 로그 자체는 실패하지 않는다."""
+        svc, client = _make_service(user_id_fn=None)
+        client.next_table_error = _detailed_api_error("permission denied")
+        with self.assertLogs("services.shared_message_service", level="ERROR") as cm:
+            with self.assertRaises(SharedMessageError):
+                svc.list_messages()
+        self.assertIn("user=unknown", "\n".join(cm.output))
+
+    def test_user_id_fn_exception_does_not_break_error_logging(self):
+        """user_id_fn 콜백 자체가 예외를 던져도 원래 오류 처리/로그를 막지 않는다."""
+        def _boom():
+            raise RuntimeError("세션 조회 실패")
+
+        svc, client = _make_service(user_id_fn=_boom)
+        client.next_table_error = _detailed_api_error("permission denied")
+        with self.assertLogs("services.shared_message_service", level="ERROR") as cm:
+            with self.assertRaises(SharedMessageError):
+                svc.list_messages()
+        self.assertIn("user=unknown", "\n".join(cm.output))
+
+    def test_message_content_and_title_never_logged(self):
+        """message_no(슬롯 번호)는 로그에 남아도 되지만, 실제 저장하려던
+        title/content(메시지 본문)는 절대 로그에 남으면 안 된다."""
+        svc, client = _make_service(user_id_fn=lambda: self._USER_ID)
+        client.next_rpc_error = _detailed_api_error("SOME_UNMAPPED_CODE: 알 수 없는 오류")
+        secret_content = "이것은 매우 은밀한 실제 발송 메시지 본문입니다 12345"
+        secret_title = "은밀한제목"
+        with self.assertLogs("services.shared_message_service", level="ERROR") as cm:
+            with self.assertRaises(SharedMessageError):
+                svc.update_message(2, secret_title, secret_content, base_revision=1, update_source="desktop")
+        joined = "\n".join(cm.output)
+        self.assertNotIn(secret_content, joined)
+        self.assertNotIn(secret_title, joined)
+
+    def test_token_and_anon_key_never_logged(self):
+        """SUPABASE_URL 전체나 anon key가 로그에 절대 남지 않는다 — project_ref만."""
+        svc, client = _make_service(
+            user_id_fn=lambda: self._USER_ID,
+            config_url="https://realproject123.supabase.co",
+        )
+        client.next_table_error = _detailed_api_error("permission denied")
+        with self.assertLogs("services.shared_message_service", level="ERROR") as cm:
+            with self.assertRaises(SharedMessageError):
+                svc.list_messages()
+        joined = "\n".join(cm.output)
+        self.assertIn("project=realproject123", joined)
+        self.assertNotIn("https://", joined)
+        self.assertNotIn(".supabase.co", joined)
+
+
+# ============================================================
+# 8. 인증 오류(SharedMessageAuthError) 분류 — 네트워크/RPC 오류와 구분
+# ============================================================
+# 배경: 공유 Supabase Client에 로그인 세션이 아직 반영되지 않은 상태로
+# shared_messages 요청이 나가면(예: 앱 시작 직후 경쟁 상태), anon 권한으로
+# 거부되어 PGRST301/42501류의 Postgres/PostgREST 오류가 난다 — 지금까지는
+# 이것도 "SharedMessageService: 알 수 없는 RPC 오류 유형"으로만 뭉뚱그려져
+# 순수 네트워크 오류와 구분할 수 없었다.
+
+def _auth_like_api_error(code: str, message: str = "permission denied") -> PostgrestAPIError:
+    return PostgrestAPIError({"message": message, "code": code})
+
+
+class TestAuthErrorClassification(unittest.TestCase):
+    def test_query_path_42501_classified_as_auth_error(self):
+        svc, client = _make_service()
+        client.next_table_error = _auth_like_api_error("42501")
+        with self.assertRaises(SharedMessageAuthError):
+            svc.list_messages()
+
+    def test_query_path_pgrst301_classified_as_auth_error(self):
+        svc, client = _make_service()
+        client.next_table_error = _auth_like_api_error("PGRST301", "JWT expired")
+        with self.assertRaises(SharedMessageAuthError):
+            svc.get_message(1)
+
+    def test_query_path_generic_timeout_not_classified_as_auth_error(self):
+        """인증과 무관한(APIError조차 아닌) 순수 네트워크 오류는 여전히 일반
+        SharedMessageError여야 한다 — 모든 실패를 인증 오류로 뭉뚱그리면 안 된다."""
+        svc, client = _make_service()
+        client.next_table_error = TimeoutError("연결 시간 초과")
+        with self.assertRaises(SharedMessageError) as cm:
+            svc.list_messages()
+        self.assertNotIsInstance(cm.exception, SharedMessageAuthError)
+
+    def test_rpc_path_unmapped_code_42501_classified_as_auth_error(self):
+        svc, client = _make_service()
+        client.next_rpc_error = _auth_like_api_error("42501", "permission denied for function update_shared_message")
+        with self.assertRaises(SharedMessageAuthError):
+            svc.update_message(1, None, "x", base_revision=1, update_source="desktop")
+
+    def test_rpc_path_unmapped_code_other_not_classified_as_auth_error(self):
+        """42501/PGRST301류가 아닌 다른 알 수 없는 코드는 여전히 일반
+        SharedMessageError여야 한다(인증 오류로 과도하게 넓히지 않음)."""
+        svc, client = _make_service()
+        client.next_rpc_error = _api_error("SOME_UNMAPPED_CODE: 알 수 없음")
+        with self.assertRaises(SharedMessageError) as cm:
+            svc.update_message(1, None, "x", base_revision=1, update_source="desktop")
+        self.assertNotIsInstance(cm.exception, SharedMessageAuthError)
+
+    def test_known_permission_denied_rpc_code_is_not_auth_error(self):
+        """서버가 명시적으로 'PERMISSION_DENIED: ...'를 던진 경우(승인된 사용자가
+        맞지만 편집 권한이 없는 등)는 기존처럼 SharedMessagePermissionError이지,
+        SharedMessageAuthError(세션 문제)로 바뀌면 안 된다 — 원인이 다르다."""
+        svc, client = _make_service()
+        client.next_rpc_error = _api_error("PERMISSION_DENIED: 메시지를 수정할 권한이 없습니다.")
+        with self.assertRaises(SharedMessagePermissionError):
+            svc.update_message(1, None, "x", base_revision=1, update_source="desktop")
+
+
+# ============================================================
+# 9. ensure_logged_in_fn — 로그인 안 된 상태면 네트워크 요청 자체를 막는다
+# ============================================================
+# 배경: 공유 Supabase Client에 아직 로그인 세션이 반영되지 않았을 수 있는
+# 좁은 시간대(앱 시작 직후)에 shared_messages 요청이 나가는 것을 막기 위한
+# 최소한의 방어선(요구사항 4절 "최소 범위로 반영").
+
+class TestEnsureLoggedIn(unittest.TestCase):
+    def test_false_blocks_list_messages_without_network_call(self):
+        svc, client = _make_service(ensure_logged_in_fn=lambda: False)
+        with self.assertRaises(SharedMessageAuthError):
+            svc.list_messages()
+        self.assertIsNone(client.last_table_query, "로그인 안 된 상태에서는 테이블 조회 자체를 시도하면 안 됨")
+
+    def test_false_blocks_get_message_without_network_call(self):
+        svc, client = _make_service(ensure_logged_in_fn=lambda: False)
+        with self.assertRaises(SharedMessageAuthError):
+            svc.get_message(1)
+        self.assertIsNone(client.last_table_query)
+
+    def test_false_blocks_update_message_without_rpc_call(self):
+        svc, client = _make_service(ensure_logged_in_fn=lambda: False)
+        with self.assertRaises(SharedMessageAuthError):
+            svc.update_message(1, None, "x", base_revision=1, update_source="desktop")
+        self.assertEqual(client.rpc_calls, [], "로그인 안 된 상태에서는 RPC 호출 자체를 시도하면 안 됨")
+
+    def test_false_blocks_force_update_message_without_rpc_call(self):
+        svc, client = _make_service(ensure_logged_in_fn=lambda: False)
+        with self.assertRaises(SharedMessageAuthError):
+            svc.force_update_message(1, None, "x", update_source="admin_force")
+        self.assertEqual(client.rpc_calls, [])
+
+    def test_false_blocks_list_history_without_network_call(self):
+        svc, client = _make_service(ensure_logged_in_fn=lambda: False)
+        with self.assertRaises(SharedMessageAuthError):
+            svc.list_history()
+        self.assertIsNone(client.last_table_query)
+
+    def test_true_does_not_block_normal_operation(self):
+        svc, client = _make_service(ensure_logged_in_fn=lambda: True)
+        client.next_table_data = [_row(message_no=1)]
+        records = svc.list_messages()
+        self.assertEqual(len(records), 1)
+
+    def test_callback_exception_treated_as_not_logged_in_no_crash(self):
+        def _boom():
+            raise RuntimeError("세션 조회 실패")
+
+        svc, client = _make_service(ensure_logged_in_fn=_boom)
+        with self.assertRaises(SharedMessageAuthError):
+            svc.list_messages()
+        self.assertIsNone(client.last_table_query)
+
+    def test_none_means_no_gate_default_behavior_unchanged(self):
+        svc, client = _make_service(ensure_logged_in_fn=None)
+        client.next_table_data = [_row(message_no=1)]
+        records = svc.list_messages()
+        self.assertEqual(len(records), 1)
 
 
 if __name__ == "__main__":

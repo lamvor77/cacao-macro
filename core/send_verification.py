@@ -83,11 +83,17 @@ def _classify_error(exc: Exception) -> tuple:
     fetch_fn에 순수 예외만 던지는 fake를 쓸 수 있도록) 함수 안에서 지연 import한다."""
     try:
         from services.shared_message_service import (
-            SharedMessageError, SharedMessagePermissionError, SharedMessageValidationError,
+            SharedMessageAuthError, SharedMessageError, SharedMessagePermissionError,
+            SharedMessageValidationError,
         )
     except ImportError:
         return VerificationErrorCode.NETWORK_ERROR, str(exc)
 
+    # SharedMessageAuthError를 먼저 확인한다 — SharedMessagePermissionError(서버가
+    # PERMISSION_DENIED로 명시 거부)와는 원인이 다르다(세션 만료/미반영으로 요청
+    # 자체가 인증되지 않음, 요구사항 6절 "인증 실패"를 "네트워크 실패"와 구분).
+    if isinstance(exc, SharedMessageAuthError):
+        return VerificationErrorCode.AUTH_ERROR, str(exc)
     if isinstance(exc, SharedMessagePermissionError):
         return VerificationErrorCode.AUTH_ERROR, str(exc)
     if isinstance(exc, SharedMessageValidationError):

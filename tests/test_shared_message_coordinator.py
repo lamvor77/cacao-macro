@@ -151,6 +151,32 @@ class TestSaveLifecycle(unittest.TestCase):
         coord.mark_conflict(1)
         self.assertEqual(coord.get_state(1).status, MessageSyncStatus.CONFLICT)
 
+    def test_mark_conflict_without_latest_does_not_touch_content_or_pending_remote(self):
+        """요구사항 5절 — 서버 최신값을 못 받았어도(또는 아직 안 줬어도) 로컬
+        content를 조용히 덮어쓰지 않는다."""
+        coord = SharedMessageCoordinator()
+        coord.get_state(1).content = "로컬에서 작성 중인 내용"
+        coord.mark_conflict(1)
+        state = coord.get_state(1)
+        self.assertEqual(state.status, MessageSyncStatus.CONFLICT)
+        self.assertEqual(state.content, "로컬에서 작성 중인 내용")
+        self.assertIsNone(state.pending_remote)
+
+    def test_mark_conflict_with_latest_populates_pending_remote_without_overwriting_content(self):
+        """요구사항 5절 — 서버 최신값을 재조회해 pending_remote로 보류한다(기존
+        REMOTE_UPDATED 대화상자 재사용 가능하도록) — content 자체는 사용자가
+        명시적으로 선택하기 전까지 그대로 둔다(자동 덮어쓰기 금지)."""
+        coord = SharedMessageCoordinator()
+        coord.get_state(1).content = "로컬에서 작성 중인 내용"
+        latest = _snap(1, content="다른 직원이 저장한 최신 내용", revision=5)
+
+        coord.mark_conflict(1, latest=latest)
+
+        state = coord.get_state(1)
+        self.assertEqual(state.status, MessageSyncStatus.CONFLICT)
+        self.assertEqual(state.content, "로컬에서 작성 중인 내용")
+        self.assertIs(state.pending_remote, latest)
+
     def test_mark_offline_pending_sets_status(self):
         coord = SharedMessageCoordinator()
         coord.mark_offline_pending(1)

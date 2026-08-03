@@ -28,7 +28,7 @@ APP_NAME = "카카오톡 자동화"
 # 환경변수가 전혀 없을 때만 쓰이는 안전한 기본값 — 현재 정식 배포 버전.
 # 다음 버전을 낼 때는 이 두 값만 갱신하면 된다(문자열 하드코딩 지점이
 # 이 한 곳뿐이라는 것이 이 모듈의 핵심 목적).
-_FALLBACK_VERSION = "1.2.3"
+_FALLBACK_VERSION = "1.2.4"
 _FALLBACK_CHANNEL = "stable"
 
 _DEV_VERSION = "development"

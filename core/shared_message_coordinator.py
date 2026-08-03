@@ -240,8 +240,19 @@ class SharedMessageCoordinator:
         state.is_editing = False
         state.base_revision = None
 
-    def mark_conflict(self, message_no: int) -> None:
-        self._states[message_no].status = MessageSyncStatus.CONFLICT
+    def mark_conflict(self, message_no: int, latest: Optional[RemoteMessageSnapshot] = None) -> None:
+        """저장 시도가 REVISION_CONFLICT로 거부됐을 때 호출한다(요구사항 5절
+        "정상 충돌 처리" — 뭉뚱그린 APIError가 아니라 이 전용 경로로 옴).
+
+        latest(서버 최신값을 재조회한 결과)를 함께 주면 pending_remote에 담아,
+        편집 중이던 필드였다면 포커스가 빠질 때(end_edit 이후) 기존
+        REMOTE_UPDATED와 동일한 "다른 직원이 수정했습니다" 대화상자로 안내할 수
+        있다 — 사용자 선택 없이 로컬 값으로 조용히 덮어쓰지 않는다는 원칙은
+        그대로 유지된다(콘텐츠 자체는 여기서 절대 바꾸지 않음)."""
+        state = self._states[message_no]
+        state.status = MessageSyncStatus.CONFLICT
+        if latest is not None:
+            state.pending_remote = latest
 
     def mark_offline_pending(self, message_no: int) -> None:
         self._states[message_no].status = MessageSyncStatus.OFFLINE_PENDING

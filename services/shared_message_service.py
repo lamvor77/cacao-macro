@@ -17,9 +17,12 @@
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 from services.supabase_client import SupabaseClientManager
+from services.supabase_error_utils import (
+    ApiErrorFields, extract_api_error_fields, project_ref_from_url, short_user_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +70,14 @@ class SharedMessageNotFoundError(SharedMessageError):
     않아야 한다(1~12행은 마이그레이션 시드로 항상 존재)."""
 
 
+class SharedMessageAuthError(SharedMessageError):
+    """인증/권한 관련 실패(만료된 JWT, anon 권한으로 나간 요청 등) — 네트워크
+    오류나 일반 RPC 오류와 구분해서 다룬다(요구사항 6절: 발송 직전 검증 로그에서
+    "인증 실패"를 "네트워크 실패"와 구분해야 함). 로그인이 안 된 상태에서 호출됐거나
+    (ensure_logged_in_fn), PostgREST가 JWT 만료/권한 부족(PGRST301, 42501 등)을
+    반환한 경우 이 예외로 통일한다."""
+
+
 _ERROR_CODE_MAP: dict[str, type] = {
     "PERMISSION_DENIED": SharedMessagePermissionError,
     "INVALID_MESSAGE_NO": SharedMessageValidationError,
@@ -76,17 +87,107 @@ _ERROR_CODE_MAP: dict[str, type] = {
 }
 
 
-def _translate_rpc_error(exc: Exception) -> SharedMessageError:
+_AUTH_ERROR_CODES = ("PGRST301", "PGRST302", "42501")
+
+
+def _looks_like_auth_error(fields: ApiErrorFields) -> bool:
+    """PostgREST/Postgres 오류가 인증/권한 문제(JWT 만료, anon 권한으로 나간
+    요청 등)로 보이는지 판별한다 — 네트워크 오류(타임아웃/연결 끊김)와
+    구분하기 위함이다(요구사항 6절).
+
+    PGRST301=JWT 만료, PGRST302=JWT를 찾을 수 없음, 42501=권한 부족(우리
+    RPC는 anon의 EXECUTE 권한을 명시적으로 회수해뒀으므로, 세션이 아직 공유
+    Supabase Client에 반영되지 않은 상태로 호출되면 이 코드가 나기 쉽다).
+    코드가 없는 경우(라이브러리가 못 채운 경우)에는 메시지 텍스트에서
+    "jwt"/"permission denied"를 보조적으로 확인한다."""
+    if fields.code in _AUTH_ERROR_CODES:
+        return True
+    message = (fields.message or "").lower()
+    return "jwt" in message or "permission denied" in message
+
+
+def _log_context(
+    *, operation: str, rpc: Optional[str], message_no: Optional[int], revision: Optional[int],
+    user_id: Optional[str], project_ref: str,
+) -> str:
+    """로그 문자열에 공통으로 붙이는 안전한 호출 컨텍스트.
+
+    message_no/revision은 슬롯 번호·버전 숫자일 뿐 메시지 본문이 아니므로
+    로그에 남겨도 안전하다 — title/content(실제 메시지 텍스트)는 이 함수도,
+    아래 _translate_rpc_error/_log_and_classify_query_error도 어디에도 인자로 받지 않는다
+    (요구사항 — 메시지 본문 전체를 로그에 남기지 않음)."""
+    return (
+        f"operation={operation}, rpc={rpc}, message_no={message_no}, revision={revision}, "
+        f"user={short_user_id(user_id)}, project={project_ref}"
+    )
+
+
+def _translate_rpc_error(
+    exc: Exception, *, operation: str = "unknown", rpc: Optional[str] = None,
+    message_no: Optional[int] = None, revision: Optional[int] = None,
+    user_id: Optional[str] = None, project_ref: str = "unknown",
+) -> SharedMessageError:
     """docs/sql/shared_messages_realtime.sql의 'CODE: 메시지' RAISE EXCEPTION을 파싱한다
-    (services/admin_service.py의 _translate_rpc_error와 동일한 컨벤션)."""
-    message = getattr(exc, "message", None) or str(exc)
+    (services/admin_service.py의 _translate_rpc_error와 동일한 컨벤션 —
+    APIError 필드 추출 자체는 services/supabase_error_utils.py 공용 함수를 쓴다).
+
+    지금까지는 예상 밖의 오류(권한 부족, 타임아웃, 함수/테이블 없음 등)가 나면
+    "APIError"라는 예외 타입 이름만 로그에 남아 shared_messages 저장/조회 실패의
+    실제 원인(code/message/details/hint)을 알 수 없었다 — 이번에 이를 전부
+    남기도록 고쳤다. 'CODE: 메시지' 규약에 맞지 않는 오류 중 인증/권한 문제로
+    보이는 것은 SharedMessageAuthError로(네트워크/기타 오류와 구분), 그 외는
+    기존처럼 일반 SharedMessageError로 매핑한다."""
+    fields = extract_api_error_fields(exc)
+    context = _log_context(
+        operation=operation, rpc=rpc, message_no=message_no, revision=revision,
+        user_id=user_id, project_ref=project_ref,
+    )
+
     for code, exc_cls in _ERROR_CODE_MAP.items():
         prefix = f"{code}:"
-        if message.startswith(prefix):
-            detail = message[len(prefix):].strip()
-            return exc_cls(detail or message)
-    logger.error(f"SharedMessageService: 알 수 없는 RPC 오류 유형 ({type(exc).__name__})")
+        if fields.message.startswith(prefix):
+            detail = fields.message[len(prefix):].strip()
+            logger.debug(
+                "SharedMessageService: RPC 오류 — %s, code=%s, postgrest_message=%s, details=%s, hint=%s",
+                context, fields.code, fields.message, fields.details, fields.hint,
+            )
+            return exc_cls(detail or fields.message)
+
+    logger.error(
+        "SharedMessageService: 알 수 없는 RPC 오류 유형 (%s) — %s, code=%s, postgrest_message=%s, "
+        "details=%s, hint=%s",
+        type(exc).__name__, context, fields.code, fields.message, fields.details, fields.hint,
+    )
+    if _looks_like_auth_error(fields):
+        return SharedMessageAuthError("인증이 만료되었거나 권한이 없습니다 — 다시 로그인해 주세요.")
     return SharedMessageError("메시지 저장 중 알 수 없는 오류가 발생했습니다.")
+
+
+def _log_and_classify_query_error(
+    exc: Exception, *, operation: str, message_no: Optional[int],
+    user_id: Optional[str], project_ref: str,
+) -> type:
+    """RPC(CODE: 메시지 규약)가 아닌 일반 조회(list_messages/get_message/
+    list_history)에서 발생한 오류를 로그로 남기고, 호출부가 어떤 예외
+    클래스로 감쌀지 반환한다(SharedMessageAuthError 또는 SharedMessageError).
+
+    APIError가 아니면(네트워크 오류/타임아웃 등) code/details/hint 없이
+    예외 타입만 남기고 항상 SharedMessageError로 분류한다 — "네트워크 실패"와
+    "인증 실패"를 구분하는 것이 이 함수의 핵심 목적이다(요구사항 6절)."""
+    context = _log_context(
+        operation=operation, rpc=None, message_no=message_no, revision=None,
+        user_id=user_id, project_ref=project_ref,
+    )
+    if PostgrestAPIError is not None and isinstance(exc, PostgrestAPIError):
+        fields = extract_api_error_fields(exc)
+        logger.error(
+            "SharedMessageService: 조회 오류 — %s, code=%s, postgrest_message=%s, details=%s, hint=%s",
+            context, fields.code, fields.message, fields.details, fields.hint,
+        )
+        return SharedMessageAuthError if _looks_like_auth_error(fields) else SharedMessageError
+
+    logger.error("SharedMessageService: 조회 오류 — %s, 예외 유형=%s", context, type(exc).__name__)
+    return SharedMessageError
 
 
 # ===== 모델 =====
@@ -170,14 +271,77 @@ def validate_message_no(message_no: int) -> None:
 class SharedMessageService:
     """shared_messages 조회/저장 서비스. 네트워크 호출은 항상 백그라운드 스레드에서."""
 
-    def __init__(self, client_manager: SupabaseClientManager):
+    def __init__(
+        self,
+        client_manager: SupabaseClientManager,
+        user_id_fn: Optional[Callable[[], Optional[str]]] = None,
+        ensure_logged_in_fn: Optional[Callable[[], bool]] = None,
+    ):
+        """
+        Args:
+            user_id_fn: 로그용으로만 쓰는, 현재 로그인 사용자 id를 반환하는
+                콜백(없으면 None) — 오류 로그에 "누구의 요청이었는지" 남기기
+                위함이다(요구사항: 사용자 ID 앞 8자). AuthService.load_session()처럼
+                로컬 파일만 읽는(네트워크 없는) 함수를 넘겨야 한다 — 여기서
+                네트워크 호출이나 세션 갱신을 유발하면 안 된다(services/
+                auth_service.py의 세션 갱신 경쟁 조사에서 확인된 원칙과 동일).
+            ensure_logged_in_fn: 요청을 보내기 전에 "지금 로그인 상태인가"를
+                확인하는 콜백(없으면 None — 검사하지 않음). 보통
+                AuthService.is_logged_in을 넘긴다 — 세션이 만료돼 있으면 내부적으로
+                갱신을 시도한다(락으로 직렬화됨, services/auth_service.py 참고).
+                이 콜백이 False를 반환하면 네트워크 요청 자체를 시도하지 않고
+                즉시 SharedMessageAuthError를 던진다 — 공유 Supabase Client에
+                아직 로그인 세션이 반영되지 않은 상태(앱 시작 직후 등)에서
+                shared_messages 요청이 anon 권한으로 나가 원인 불명의 APIError가
+                되는 경로를 사전에 차단하기 위한 최소한의 방어선이다. 이 콜백이
+                True를 반환해도 그 사이 세션이 만료될 수 있으므로, 이것만으로
+                인증 실패가 100% 사라지는 것은 아니다 — 그래도 실패하면
+                _translate_rpc_error/_log_and_classify_query_error가
+                SharedMessageAuthError로 분류한다.
+        """
         self._client_mgr = client_manager
+        self._user_id_fn = user_id_fn
+        self._ensure_logged_in_fn = ensure_logged_in_fn
+
+    def _current_user_id(self) -> Optional[str]:
+        """로그 전용 — 실패해도(콜백 없음/예외) 오류 로그 자체를 막지 않는다."""
+        if self._user_id_fn is None:
+            return None
+        try:
+            return self._user_id_fn()
+        except Exception:
+            return None
+
+    def _project_ref(self) -> str:
+        """로그 전용 — config 접근 자체가 실패해도(테스트 fake 등) 오류 로그를 막지 않는다."""
+        try:
+            return project_ref_from_url(self._client_mgr.config.url)
+        except AttributeError:
+            return "unknown"
+
+    def _require_logged_in(self, *, operation: str) -> None:
+        """ensure_logged_in_fn이 주어졌고 False를 반환하면, 네트워크 요청 없이
+        즉시 인증 오류로 실패시킨다(위 __init__ 문서 참고)."""
+        if self._ensure_logged_in_fn is None:
+            return
+        try:
+            logged_in = self._ensure_logged_in_fn()
+        except Exception:
+            logged_in = False
+        if not logged_in:
+            context = _log_context(
+                operation=operation, rpc=None, message_no=None, revision=None,
+                user_id=self._current_user_id(), project_ref=self._project_ref(),
+            )
+            logger.warning("SharedMessageService: 로그인 필요 — %s, 요청을 보내지 않음", context)
+            raise SharedMessageAuthError("로그인이 필요합니다 — 다시 로그인해 주세요.")
 
     # ===== 조회 =====
 
     def list_messages(self) -> list:
         """1~12번 전체를 message_no 순으로 가져온다(완료 기준 5/15 — 수동 새로고침,
         재연결 직후 정합성 복구에 사용)."""
+        self._require_logged_in(operation="list_messages")
         client_result = self._client_mgr.get_client()
         if not client_result.success:
             raise SharedMessageError(client_result.error or "Supabase 클라이언트를 사용할 수 없습니다.")
@@ -190,14 +354,18 @@ class SharedMessageService:
                 .execute()
             )
         except Exception as e:
-            logger.error(f"shared_messages 목록 조회 오류: {type(e).__name__}")
-            raise SharedMessageError("메시지 목록을 불러오지 못했습니다.") from e
+            exc_cls = _log_and_classify_query_error(
+                e, operation="list_messages", message_no=None,
+                user_id=self._current_user_id(), project_ref=self._project_ref(),
+            )
+            raise exc_cls("메시지 목록을 불러오지 못했습니다.") from e
 
         return [SharedMessageRecord.from_row(row) for row in (response.data or [])]
 
     def get_message(self, message_no: int) -> Optional[SharedMessageRecord]:
         """단일 message_no 조회 — 발송 직전 검증(요구사항 9)에 사용."""
         validate_message_no(message_no)
+        self._require_logged_in(operation="get_message")
         client_result = self._client_mgr.get_client()
         if not client_result.success:
             raise SharedMessageError(client_result.error or "Supabase 클라이언트를 사용할 수 없습니다.")
@@ -211,8 +379,11 @@ class SharedMessageService:
                 .execute()
             )
         except Exception as e:
-            logger.error(f"shared_messages 단건 조회 오류(message_no={message_no}): {type(e).__name__}")
-            raise SharedMessageError("메시지를 불러오지 못했습니다.") from e
+            exc_cls = _log_and_classify_query_error(
+                e, operation="get_message", message_no=message_no,
+                user_id=self._current_user_id(), project_ref=self._project_ref(),
+            )
+            raise exc_cls("메시지를 불러오지 못했습니다.") from e
 
         rows = response.data or []
         return SharedMessageRecord.from_row(rows[0]) if rows else None
@@ -221,6 +392,7 @@ class SharedMessageService:
         """이력 조회(관리자 화면용). message_no를 지정하면 해당 번호만 필터링."""
         if message_no is not None:
             validate_message_no(message_no)
+        self._require_logged_in(operation="list_history")
         limit = max(1, min(int(limit), 200))
         offset = max(0, int(offset))
 
@@ -240,8 +412,11 @@ class SharedMessageService:
         try:
             response = query.execute()
         except Exception as e:
-            logger.error(f"shared_message_history 조회 오류: {type(e).__name__}")
-            raise SharedMessageError("이력을 불러오지 못했습니다.") from e
+            exc_cls = _log_and_classify_query_error(
+                e, operation="list_history", message_no=message_no,
+                user_id=self._current_user_id(), project_ref=self._project_ref(),
+            )
+            raise exc_cls("이력을 불러오지 못했습니다.") from e
 
         return [SharedMessageHistoryRecord.from_row(row) for row in (response.data or [])]
 
@@ -255,6 +430,7 @@ class SharedMessageService:
         validate_message_no(message_no)
         if update_source not in _ALLOWED_UPDATE_SOURCES:
             raise SharedMessageValidationError(f"update_source는 {_ALLOWED_UPDATE_SOURCES} 중 하나여야 합니다.")
+        self._require_logged_in(operation="update_message")
 
         client_result = self._client_mgr.get_client()
         if not client_result.success:
@@ -269,10 +445,18 @@ class SharedMessageService:
                 "p_update_source": update_source,
             }).execute()
         except Exception as e:
+            user_id = self._current_user_id()
+            project_ref = self._project_ref()
             if PostgrestAPIError is not None and isinstance(e, PostgrestAPIError):
-                raise _translate_rpc_error(e) from e
-            logger.error(f"shared_messages 저장 오류(message_no={message_no}): {type(e).__name__}")
-            raise SharedMessageError("메시지 저장 중 오류가 발생했습니다.") from e
+                raise _translate_rpc_error(
+                    e, operation="update_message", rpc=_RPC_UPDATE, message_no=message_no,
+                    revision=base_revision, user_id=user_id, project_ref=project_ref,
+                ) from e
+            exc_cls = _log_and_classify_query_error(
+                e, operation="update_message", message_no=message_no,
+                user_id=user_id, project_ref=project_ref,
+            )
+            raise exc_cls("메시지 저장 중 오류가 발생했습니다.") from e
 
         return SharedMessageRecord.from_row(response.data)
 
@@ -285,6 +469,7 @@ class SharedMessageService:
         validate_message_no(message_no)
         if update_source not in _ALLOWED_FORCE_UPDATE_SOURCES:
             raise SharedMessageValidationError(f"update_source는 {_ALLOWED_FORCE_UPDATE_SOURCES} 중 하나여야 합니다.")
+        self._require_logged_in(operation="force_update_message")
 
         client_result = self._client_mgr.get_client()
         if not client_result.success:
@@ -298,10 +483,18 @@ class SharedMessageService:
                 "p_update_source": update_source,
             }).execute()
         except Exception as e:
+            user_id = self._current_user_id()
+            project_ref = self._project_ref()
             if PostgrestAPIError is not None and isinstance(e, PostgrestAPIError):
-                raise _translate_rpc_error(e) from e
-            logger.error(f"shared_messages 강제 저장 오류(message_no={message_no}): {type(e).__name__}")
-            raise SharedMessageError("메시지 강제 저장 중 오류가 발생했습니다.") from e
+                raise _translate_rpc_error(
+                    e, operation="force_update_message", rpc=_RPC_FORCE_UPDATE, message_no=message_no,
+                    user_id=user_id, project_ref=project_ref,
+                ) from e
+            exc_cls = _log_and_classify_query_error(
+                e, operation="force_update_message", message_no=message_no,
+                user_id=user_id, project_ref=project_ref,
+            )
+            raise exc_cls("메시지 강제 저장 중 오류가 발생했습니다.") from e
 
         return SharedMessageRecord.from_row(response.data)
 

@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from services.supabase_client import SupabaseClientManager
+from services.supabase_error_utils import extract_api_error_fields
 
 logger = logging.getLogger(__name__)
 
@@ -95,24 +96,21 @@ def _translate_rpc_error(exc: Exception) -> AdminServiceError:
     없었다 — 이런 경우일수록 code/details/hint에 실제 원인이 들어있으므로 전부
     로그에 남긴다.
     """
-    message = getattr(exc, "message", None) or str(exc)
-    code = getattr(exc, "code", None)
-    details = getattr(exc, "details", None)
-    hint = getattr(exc, "hint", None)
+    fields = extract_api_error_fields(exc)
 
     for known_code, exc_cls in _ERROR_CODE_MAP.items():
         prefix = f"{known_code}:"
-        if message.startswith(prefix):
-            detail = message[len(prefix):].strip()
+        if fields.message.startswith(prefix):
+            detail = fields.message[len(prefix):].strip()
             logger.debug(
                 "AdminService: RPC 오류 — code=%s, message=%s, details=%s, hint=%s",
-                code, message, details, hint,
+                fields.code, fields.message, fields.details, fields.hint,
             )
-            return exc_cls(detail or message)
+            return exc_cls(detail or fields.message)
 
     logger.error(
         "AdminService: 알 수 없는 RPC 오류 유형 (%s) — code=%s, message=%s, details=%s, hint=%s",
-        type(exc).__name__, code, message, details, hint,
+        type(exc).__name__, fields.code, fields.message, fields.details, fields.hint,
     )
     return AdminServiceError("관리자 작업 중 알 수 없는 오류가 발생했습니다.")
 
